@@ -1,1 +1,2 @@
-# No third-party Python packages are required for the current analysis-only milestone.
+PyMuPDF>=1.26,<2
+pypdf>=5.9,<7

@@ -57,11 +57,6 @@ def _procedure_and_category(text: str) -> tuple[Optional[str], Optional[str]]:
     title = title.replace("HI - TACAN", "HI TACAN").replace("LO - TACAN", "LO TACAN")
     title = title.replace("HI/LO TACAN", "HI/LO TACAN")
 
-    # The selected tab in the page header is authoritative for diagram sheets.
-    # Some diagram sheets (e.g. RADAR INSTRUMENT APPROACH MINIMUMS) have titles
-    # that otherwise look like approach procedures.
-    if lines[0].upper().startswith("DİYAGRAM"):
-        return title, "Diagram"
     if "AERODROME DIAGRAM" in title:
         return "AERODROME DIAGRAM", "Diagram"
     if "PARKING/DOCKING" in title:
@@ -72,7 +67,9 @@ def _procedure_and_category(text: str) -> tuple[Optional[str], Optional[str]]:
         return title, "Arrival"
     if title.startswith(("SID ", "TACAN SID", "VOR/DME SID", "RNAV SID", "RNAV (GNSS) SID", "HPMA SID")):
         return title, "Departure"
-    if "RADAR MINIMUM ALTITUDE" in title or "RADAR INSTRUMENT APPROACH MINIMUM" in title:
+    if "RADAR INSTRUMENT APPROACH MINIMUM" in title:
+        return title, "Diagram"
+    if "RADAR MINIMUM ALTITUDE" in title:
         return title, "Approach"
     if title.startswith("TAC TO PAR"):
         return title, "Approach"

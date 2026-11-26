@@ -13,6 +13,7 @@ APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
 DEFAULT_OUTPUT = PROJECT_DIR / "HEDEF" / "Initial"
 
+
 @dataclass
 class ChartInfo:
     pdf_page: int
@@ -51,12 +52,16 @@ def _procedure_and_category(text: str) -> tuple[Optional[str], Optional[str]]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) < 3:
         return None, None
-    # The FLIP chart title is consistently the third non-empty line on the page.
     title = re.split(r"\s{2,}", lines[2].strip(), maxsplit=1)[0].strip().upper()
     title = re.sub(r"\s+", " ", title)
     title = title.replace("HI - TACAN", "HI TACAN").replace("LO - TACAN", "LO TACAN")
     title = title.replace("HI/LO TACAN", "HI/LO TACAN")
 
+    # The selected tab in the page header is authoritative for diagram sheets.
+    # Some diagram sheets (e.g. RADAR INSTRUMENT APPROACH MINIMUMS) have titles
+    # that otherwise look like approach procedures.
+    if lines[0].upper().startswith("DİYAGRAM"):
+        return title, "Diagram"
     if "AERODROME DIAGRAM" in title:
         return "AERODROME DIAGRAM", "Diagram"
     if "PARKING/DOCKING" in title:
@@ -74,8 +79,6 @@ def _procedure_and_category(text: str) -> tuple[Optional[str], Optional[str]]:
     if any(token in title for token in ("TACAN", "ILS", "LOC", "RNP", "VOR", "NDB")):
         return title, "Approach"
 
-    # Fallback for pages whose chart artwork is rotated and Poppler's layout
-    # mode cannot recover the heading line (e.g. the Cengiz Topel arrival chart).
     compact = re.sub(r"\s+", " ", text.upper())
     fallback_rules = (
         (r"RNAV\s*\(GNSS\)\s+ARRIVAL(?:\s+RWY\s+\d{1,2}[LRC]?)?", "Arrival"),
@@ -99,58 +102,51 @@ def inspect_pdf(path: Path, effective_date: str, document_type: str) -> tuple[li
         APP_DIR / "tools" / "poppler" / "bin" / "pdftotext",
     )
     pdftotext = next((str(candidate) for candidate in bundled_candidates if candidate.is_file()), None)
-    pdftotext = pdftotext or shutil.which("pdftotext")
+    pdftotext = pdftotext or shutil.which("pdftotext") or ensure_poppler()
 
-    if not pdftotext:
-        raise RuntimeError(
-            "PDF metin motoru bulunamadı. İlk kurulum için App\\setup_poppler.ps1 dosyasını çalıştırın."
-        )
-
-    if pdftotext:
-        result = subprocess.run(
-            [pdftotext, "-layout", str(path), "-"],
-            check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        page_texts = result.stdout.split("\f")
-        raw_page_texts: Optional[list[str]] = None
-        last_airport: Optional[str] = None
-        for index, raw_text in enumerate(page_texts, start=1):
-            text = _normalise(raw_text)
-            if not text.strip():
-                continue
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-            first_line = lines[0].upper() if lines else ""
-            if not (first_line.startswith("DİYAGRAM") or first_line.startswith("MEYDANLAR")):
-                # Retry rotated chart pages using Poppler's raw text ordering.
-                if raw_page_texts is None:
-                    raw_result = subprocess.run(
-                        [pdftotext, "-raw", str(path), "-"],
-                        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    )
-                    raw_page_texts = raw_result.stdout.split("\f")
-                if index - 1 >= len(raw_page_texts):
-                    continue
-                raw_candidate = _normalise(raw_page_texts[index - 1])
-                if "DİYAGRAM" not in raw_candidate[-300:].upper():
-                    continue
-                text = raw_candidate
-            chart_no = _chart_number(text)
-            airport = _airport_code(text) or last_airport
-            if airport:
-                last_airport = airport
-            procedure, category = _procedure_and_category(text)
-            if not (chart_no and airport and procedure and category):
-                details = "; ".join(
-                    item for item in (
-                        f"chart={chart_no}" if chart_no else "",
-                        f"airport={airport}" if airport else "",
-                        f"procedure={procedure}" if procedure else "",
-                    ) if item
+    result = subprocess.run(
+        [pdftotext, "-layout", str(path), "-"],
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    page_texts = result.stdout.split("\f")
+    raw_page_texts: Optional[list[str]] = None
+    last_airport: Optional[str] = None
+    for index, raw_text in enumerate(page_texts, start=1):
+        text = _normalise(raw_text)
+        if not text.strip():
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        first_line = lines[0].upper() if lines else ""
+        if not (first_line.startswith("DİYAGRAM") or first_line.startswith("MEYDANLAR")):
+            if raw_page_texts is None:
+                raw_result = subprocess.run(
+                    [pdftotext, "-raw", str(path), "-"],
+                    check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 )
-                unresolved.append((index, details or "Chart başlığı ayrıştırılamadı"))
+                raw_page_texts = raw_result.stdout.split("\f")
+            if index - 1 >= len(raw_page_texts):
                 continue
-            safe_procedure = re.sub(r"[\\/:*?\"<>|]", "", procedure)
-            safe_procedure = re.sub(r"\s+", " ", safe_procedure).strip()
-            filename = f"{airport}_{category}_{doc_type} {chart_no} {safe_procedure} to {date}.pdf"
-            charts.append(ChartInfo(index, chart_no, airport, category, safe_procedure, filename))
-        return charts, unresolved
+            raw_candidate = _normalise(raw_page_texts[index - 1])
+            if "DİYAGRAM" not in raw_candidate[-300:].upper():
+                continue
+            text = raw_candidate
+        chart_no = _chart_number(text)
+        airport = _airport_code(text) or last_airport
+        if airport:
+            last_airport = airport
+        procedure, category = _procedure_and_category(text)
+        if not (chart_no and airport and procedure and category):
+            details = "; ".join(
+                item for item in (
+                    f"chart={chart_no}" if chart_no else "",
+                    f"airport={airport}" if airport else "",
+                    f"procedure={procedure}" if procedure else "",
+                ) if item
+            )
+            unresolved.append((index, details or "Chart başlığı ayrıştırılamadı"))
+            continue
+        safe_procedure = re.sub(r"[\\/:*?\"<>|]", "", procedure)
+        safe_procedure = re.sub(r"\s+", " ", safe_procedure).strip()
+        filename = f"{airport}_{category}_{doc_type} {chart_no} {safe_procedure} to {date}.pdf"
+        charts.append(ChartInfo(index, chart_no, airport, category, safe_procedure, filename))
+    return charts, unresolved

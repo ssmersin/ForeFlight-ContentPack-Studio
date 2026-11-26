@@ -12,11 +12,17 @@ from pdf_splitter import split_chart_pages
 
 
 class PdfSplitterTests(unittest.TestCase):
-    def test_diagram_tab_overrides_approach_sounding_title(self) -> None:
+    def test_radar_instrument_approach_minimums_is_diagram(self) -> None:
         text = "DİYAGRAM                    APPROACH                         SID\n12-8\nRADAR INSTRUMENT APPROACH MINIMUMS\nCIGLI (LTBL)"
         procedure, category = _procedure_and_category(text)
         self.assertEqual(procedure, "RADAR INSTRUMENT APPROACH MINIMUMS")
         self.assertEqual(category, "Diagram")
+
+    def test_navigation_header_does_not_turn_every_chart_into_diagram(self) -> None:
+        text = "DİYAGRAM                    APPROACH                         SID\n1-2\nHILO TACAN RWY 34R\nAIRPORT (LTBJ)"
+        procedure, category = _procedure_and_category(text)
+        self.assertEqual(procedure, "HILO TACAN RWY 34R")
+        self.assertEqual(category, "Approach")
 
     def test_geospatial_page_and_catalog_dictionaries_survive_split(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

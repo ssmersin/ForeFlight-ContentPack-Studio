@@ -6,7 +6,7 @@ This stage is a **document-analysis and chart-page export core**, not a user-int
 
 Open \`ForeFlight-ContentPack-Studio.sln\` from the repository root. The solution contains the Python project in \`App/\`.
 
-Use Visual Studio's **Python Environments** window to create/select the project's Python environment. Install \`App/requirements.txt\` into that environment. The current export engine uses PyMuPDF for normal PDFs and pypdf for GeoPDF-safe page copying.
+Use Visual Studio's **Python Environments** window to create/select the project's Python environment. Install \`App/requirements.txt\` into that environment. The export engine uses PyMuPDF for ordinary PDF pages and pypdf for widget appearance flattening and GeoPDF-safe page copying.
 
 ## PDF text engine
 
@@ -31,10 +31,10 @@ Filenames are derived from the cover's effective-to date (for example, \`01 MAR 
 
 ## PDF preservation strategy
 
-- **Ordinary PDFs:** PyMuPDF copies the original page as vector content and optimizes the output. Internal navigation widgets/links and annotations are omitted because they point into the original multi-page publication and cannot function as intended in a one-page export.
+- **Ordinary PDFs:** PyMuPDF copies vector page content. Visible form/widget appearances (such as FLIP's top navigation tabs and home icon) are flattened into the page as vector form XObjects. Their interactive actions and links are not retained because their destinations refer to the original multi-page publication.
 - **GeoPDFs:** Before export, the source is checked for page \`/VP\`, \`/Measure\`, \`/LGIDict\`, and catalog \`/LGIDict\` structures. GeoPDF pages use pypdf object copying rather than page rewriting/rasterization; detected page-level geospatial dictionaries are checked in the exported file. Catalog-level \`/LGIDict\` is copied as well.
 
-The current \`Kitap.pdf\` sample follows the ordinary-PDF path. The GeoPDF path is also covered by a synthetic preservation test; it should still be validated against representative real-world GeoPDFs before production use.
+The current \`Kitap.pdf\` sample follows the ordinary-PDF path. Its page artwork and visible navigation widget appearances were compared against the source. The GeoPDF path is covered by a synthetic preservation test; representative real-world GeoPDFs are still required for broader validation.
 
 ## Output
 

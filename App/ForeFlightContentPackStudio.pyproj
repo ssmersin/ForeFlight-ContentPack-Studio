@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>{6C2CFA19-2B37-4D2C-9B18-4D3EABCC6E27}</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <ProjectTypeGuids>{888888A0-9F3D-457C-B088-3A5042F75D52}</ProjectTypeGuids>
+    <StartupFile>main.py</StartupFile>
+    <SearchPath>.</SearchPath>
+    <WorkingDirectory>$(ProjectHome)</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>ForeFlight Content Pack Studio</Name>
+    <RootNamespace>ForeFlightContentPackStudio</RootNamespace>
+    <InterpreterId>MSBuild|venv|$(MSBuildProjectDirectory)\.venv</InterpreterId>
+    <IsWindowsApplication>false</IsWindowsApplication>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="main.py" />
+    <Compile Include="flip_parser.py" />
+    <Compile Include="cover_metadata.py" />
+    <Content Include="requirements.txt" />
+    <Content Include="setup_poppler.ps1" />
+    <Content Include="README.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="tests\" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath)\Microsoft\VisualStudio\Python Tools\Microsoft.PythonTools.targets" Condition="Exists('$(MSBuildExtensionsPath)\Microsoft\VisualStudio\Python Tools\Microsoft.PythonTools.targets')" />
+</Project>

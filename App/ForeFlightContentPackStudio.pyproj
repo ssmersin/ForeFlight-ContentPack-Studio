@@ -12,19 +12,18 @@
     <OutputPath>.</OutputPath>
     <Name>ForeFlight Content Pack Studio</Name>
     <RootNamespace>ForeFlightContentPackStudio</RootNamespace>
-    <InterpreterId>MSBuild|venv|$(MSBuildProjectDirectory)\.venv</InterpreterId>
     <IsWindowsApplication>false</IsWindowsApplication>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="main.py" />
     <Compile Include="flip_parser.py" />
     <Compile Include="cover_metadata.py" />
+    <Compile Include="dependency_setup.py" />
     <Content Include="requirements.txt" />
-    <Content Include="setup_poppler.ps1" />
     <Content Include="README.md" />
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="tests\" />
+    <Folder Include="tests\\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath)\Microsoft\VisualStudio\Python Tools\Microsoft.PythonTools.targets" Condition="Exists('$(MSBuildExtensionsPath)\Microsoft\VisualStudio\Python Tools\Microsoft.PythonTools.targets')" />
 </Project>

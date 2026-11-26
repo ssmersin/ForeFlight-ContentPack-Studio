@@ -1,9 +1,13 @@
 # ForeFlight Content Pack Studio
 
-Windows desktop application for preparing ForeFlight content packs.
+Windows-first Python project for analyzing aviation PDF publications and preparing ForeFlight content-pack data.
 
-## Current development stage
+## Open the project
 
-The first milestone is FLIP PDF chart separation. The application is in `App/`, and its default output directory is `HEDEF/Initial/`.
+Open `ForeFlight-ContentPack-Studio.sln` in Visual Studio 2026. The solution contains the Python project in `App/`; project dependencies are managed through Visual Studio's Python Environments interface and `App/requirements.txt`.
 
-See [App/README.md](App/README.md) for setup and run instructions. No development branches are created; work proceeds directly on `main` unless the repository owner explicitly approves otherwise.
+## Current milestone
+
+The first milestone analyzes FLIP PDFs without asking the user to re-enter information already printed on the cover. It reads the document type and effective date range from page 1, classifies chart pages, and writes a CSV manifest to `HEDEF/Initial/`.
+
+PDF page splitting and content-pack generation will follow after page-level GeoPDF metadata preservation is verified. No branches are created without the repository owner's approval; development proceeds directly on `main`.

@@ -221,3 +221,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Generated FLIP exports and local third-party runtime
+HEDEF/
+App/tools/

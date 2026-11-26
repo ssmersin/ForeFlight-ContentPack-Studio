@@ -22,8 +22,5 @@
     <Content Include="requirements.txt" />
     <Content Include="README.md" />
   </ItemGroup>
-  <ItemGroup>
-    <Folder Include="tests\\" />
-  </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath)\Microsoft\VisualStudio\Python Tools\Microsoft.PythonTools.targets" Condition="Exists('$(MSBuildExtensionsPath)\Microsoft\VisualStudio\Python Tools\Microsoft.PythonTools.targets')" />
 </Project>

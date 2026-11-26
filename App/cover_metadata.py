@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from dependency_setup import ensure_poppler
+
 
 @dataclass(frozen=True)
 class DocumentMetadata:
@@ -26,12 +28,7 @@ def _pdftotext() -> str:
         if candidate.is_file():
             return str(candidate)
     found = shutil.which("pdftotext")
-    if found:
-        return found
-    raise RuntimeError(
-        "Poppler pdftotext is not installed. In Visual Studio, open App/setup_poppler.ps1 "
-        "and run it in a PowerShell window, or install Poppler and add its bin folder to PATH."
-    )
+    return found or ensure_poppler()
 
 
 def read_cover_metadata(pdf_path: Path) -> DocumentMetadata:
@@ -57,11 +54,10 @@ def read_cover_metadata(pdf_path: Path) -> DocumentMetadata:
         raise ValueError("The effective date range could not be read from the PDF cover.")
 
     date_from, date_to = (part.upper() for part in effective_match.groups())
-    month_year = date_to.split()
-    effective_date = f"{month_year[1]}{month_year[2]}"
+    month, year = date_to.split()[1:]
     return DocumentMetadata(
         document_type="FLIP",
-        effective_date=effective_date,
+        effective_date=f"{month}{year}",
         effective_from=date_from,
         effective_to=date_to,
     )

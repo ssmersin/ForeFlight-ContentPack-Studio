@@ -60,35 +60,35 @@ def main() -> int:
                 ))
 
         generated = split_chart_pages(source, charts, initial_dir)
-        first_exports, diag_exports, skipped_first = run_first_stage_planview_charts(
+        (
+            first_exports,
+            diag_exports,
+            turn_diag_exports,
+            skipped_first,
+            rotated_items,
+        ) = run_combined_roi_orientation_stage(
             initial_dir=initial_dir,
-            first_dir=first_dir,
+            output_dir=first_dir,
             charts=charts,
             diagnostic=args.diagnostic,
-            diagnostic_dir=diagnostic_dir,
-        )
-        turned_exports, turn_diag_exports, rotated_items = run_second_stage_orientation_turn(
-            first_dir=first_dir,
-            second_dir=second_dir,
-            diagnostic=args.diagnostic,
-            diagnostic_dir=turn_diag_dir if args.diagnostic else None,
+            roi_diagnostic_dir=diagnostic_dir if args.diagnostic else None,
+            orientation_diagnostic_dir=turn_diag_dir if args.diagnostic else None,
         )
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    first_pdf_count = len(list(first_dir.glob("*.pdf")))
     print(f"Document type : {metadata.document_type}")
     print(f"Effective     : {metadata.effective_from} TO {metadata.effective_to}")
     print(f"Filename date : {metadata.effective_date}")
     print(f"Chart pages   : {len(charts)}")
     print(f"PDF exports   : {len(generated)}")
-    print(f"01-First moved: {len(first_exports)} (skipped: {len(skipped_first)})")
+    print(f"01-ROI+Orientation: {len(first_exports)} (skipped: {len(skipped_first)})")
     for name in skipped_first:
         print(f"00-INITIAL REMAINED (no closed frame): {name}")
     if args.diagnostic:
         print(f"01-First-Diag : {len(diag_exports)}")
-    print(f"02-Second-Turn: {len(turned_exports)} (rotated: {len(rotated_items)}, remained in 01-First: {first_pdf_count})")
+    print(f"Orientation rotated: {len(rotated_items)}")
     for fname, rot_deg, method in rotated_items:
         print(f"  ROTATED {rot_deg}° CW [{method}]: {fname}")
     if args.diagnostic:

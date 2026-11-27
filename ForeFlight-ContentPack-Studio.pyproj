@@ -39,6 +39,7 @@
     <Compile Include="App\roi_orientation_pipeline.py" />
     <Compile Include="App\tests\test_pdf_splitter.py" />
     <Compile Include="App\tests\test_orientation_turn_features.py" />
+    <Compile Include="App\tests\test_roi_orientation_pipeline.py" />
   </ItemGroup>
   <ItemGroup>
     <Interpreter Include=".venv\">

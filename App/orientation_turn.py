@@ -57,6 +57,7 @@ class OrientationResult:
     var_check: str = "n/a"  # "OK" | "MISMATCH" | "n/a"
     basis: str = ""  # "arrow_N_label" | "arrow_pair" | "indicator_text" | "lat_labels"
     text_lines: int = 0  # ROI icinde okunan metin satiri sayisi (0 ise metin katmani yok/outline)
+    apply_rotation: bool = True  # Arrival ilk turda sadece diagnostic; onay sonrasi etkinlestirilecek
 
 
 # ------------------------------------------------------------------ geometri
@@ -576,7 +577,7 @@ def _detect_arrival_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> Orient
     basis = "+".join(name.lower() for name, _, _ in votes)
     check = f"ARRIVAL_AGREE({basis})" if len(votes) > 1 else f"ARRIVAL_SINGLE({basis})"
     return OrientationResult(rotation, "arrival_references", refs, var_check=check,
-                             basis=basis, text_lines=len(lines))
+                             basis=basis, text_lines=len(lines), apply_rotation=False)
 
 
 
@@ -833,6 +834,7 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
                 result.rotation_cw, result.method, refs, var_text=result.var_text, year=result.year,
                 north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
                 var_check=check, basis=result.basis, text_lines=max(result.text_lines, arrival.text_lines),
+                apply_rotation=False,
             )
         return arrival
     if is_rma:
@@ -971,7 +973,10 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 ind = "ARRIVAL_REFERENCES"
             else:
                 ind = "VAR_IND=NOT USED, LAT"
-            status = f"ROT_CW={rot_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
+            if result.method == "arrival_references" or not result.apply_rotation:
+                status = f"ARRIVAL PREVIEW ONLY | PROPOSED_CW={result.rotation_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
+            else:
+                status = f"ROT_CW={rot_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
             color = (0, 0, 220) if rot_cw else (0, 140, 0)
         else:
             if result.var_check.startswith("ARRIVAL_REFERENCE_CONFLICT"):
@@ -1087,7 +1092,10 @@ def run_second_stage_orientation_turn(
         nm = dict(meta)
         nm.update(page_width=new_w, page_height=new_h, roi=new_roi)
         nm["orientation"] = {
-            "rotation_cw": result.rotation_cw, "method": result.method, "basis": result.basis,
+            "rotation_cw": result.rotation_cw if result.apply_rotation else 0,
+            "proposed_rotation_cw": result.rotation_cw,
+            "applied": result.apply_rotation,
+            "method": result.method, "basis": result.basis,
             "var_text": result.var_text, "year": result.year, "var_check": result.var_check,
             "north_angle_deg": result.north_angle_deg, "residual_deg": result.residual_deg, "text_lines_in_roi": result.text_lines,
         }

@@ -974,8 +974,15 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
             status = f"ROT_CW={rot_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
             color = (0, 0, 220) if rot_cw else (0, 140, 0)
         else:
-            status = f"ROT_CW=0 | VAR_IND=NOT FOUND -> assumed NORTH=0 | TXT_LINES_IN_ROI={result.text_lines}"
-            color = (0, 120, 255)
+            if result.var_check.startswith("ARRIVAL_REFERENCE_CONFLICT"):
+                status = f"ROT_CW=0 | ARRIVAL REFERENCE CONFLICT -> REVIEW | {result.var_check}"
+                color = (0, 80, 255)
+            elif result.var_check == "ARRIVAL_REFERENCES_NOT_FOUND":
+                status = f"ROT_CW=0 | ARRIVAL REFERENCES NOT FOUND | TXT={result.text_lines}"
+                color = (0, 120, 255)
+            else:
+                status = f"ROT_CW=0 | VAR_IND=NOT FOUND -> assumed NORTH=0 | CHECK={result.var_check} | TXT={result.text_lines}"
+                color = (0, 120, 255)
         cv2.putText(bgr, status, (15, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
         out_jpg.parent.mkdir(parents=True, exist_ok=True)

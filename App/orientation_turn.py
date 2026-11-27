@@ -404,7 +404,7 @@ def _rect_inside(a: pymupdf.Rect, b: pymupdf.Rect, pad: float = 0.0) -> bool:
 
 
 def _filled_color_rectangles(page: pymupdf.Page, roi: pymupdf.Rect) -> list[pymupdf.Rect]:
-    """Return small filled rectangular color swatches from vector chart legends."""
+    """Return swatches and compact filled legend bars from vector chart legends."""
     rm = page.rotation_matrix
     found = []
     for drawing in page.get_drawings():
@@ -420,7 +420,23 @@ def _filled_color_rectangles(page: pymupdf.Page, roi: pymupdf.Rect) -> list[pymu
                 continue
             if 2.0 <= rect.width <= 28.0 and 2.0 <= rect.height <= 28.0:
                 found.append(rect)
-    return found
+        # Some FLIP legends are drawn as one compact filled path, not separate
+        # rectangle primitives. Keep only narrow, legend-sized filled drawings;
+        # the nearby altitude labels are the second-stage discriminator.
+        rect = pymupdf.Rect(drawing.get("rect", (0, 0, 0, 0))) * rm
+        rect.normalize()
+        if not roi.contains(pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)):
+            continue
+        ratio = rect.width / max(rect.height, 0.01)
+        if 8.0 <= rect.width <= 42.0 and 14.0 <= rect.height <= 140.0 and 0.15 <= ratio <= 1.5:
+            found.append(rect)
+    # Deduplicate overlapping rectangles from the same compound legend artwork.
+    unique = []
+    for rect in found:
+        if not any(_overlap(rect, old) and abs(rect.width - old.width) < 1.5
+                   and abs(rect.height - old.height) < 1.5 for old in unique):
+            unique.append(rect)
+    return unique
 
 
 def _group_color_swatches(rects: list[pymupdf.Rect]) -> list[pymupdf.Rect]:
@@ -462,6 +478,13 @@ def _detect_color_altitude_scale(
 ) -> Optional[dict]:
     swatches = _filled_color_rectangles(page, roi)
     groups = _group_color_swatches(swatches)
+    # Include a single compound-path legend bar as a candidate as well.
+    for rect in swatches:
+        ratio = rect.width / max(rect.height, 0.01)
+        if 8.0 <= rect.width <= 42.0 and 14.0 <= rect.height <= 140.0 and 0.15 <= ratio <= 1.5:
+            if not any(_overlap(rect, group) and abs(rect.width - group.width) < 1.5
+                       and abs(rect.height - group.height) < 1.5 for group in groups):
+                groups.append(rect)
     best = None
     for group in groups:
         pad = max(18.0, min(group.width, group.height) * 1.8)
@@ -1123,6 +1146,15 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
             elif result.var_check == "ARRIVAL_REFERENCES_NOT_FOUND":
                 status = f"ROT_CW=0 | ARRIVAL REFERENCES NOT FOUND | TXT={result.text_lines}"
                 color = (0, 120, 255)
+            elif result.var_check.startswith("DEPARTURE_REFERENCE_CONFLICT"):
+                status = f"ROT_CW=0 | DEPARTURE REFERENCE CONFLICT -> REVIEW | {result.var_check}"
+                color = (0, 80, 255)
+            elif result.var_check == "DEPARTURE_REFERENCES_NOT_FOUND":
+                status = f"ROT_CW=0 | DEPARTURE REFERENCES NOT FOUND | TXT={result.text_lines}"
+                color = (0, 120, 255)
+            elif result.var_check == "DEPARTURE_TEXT_CONFLICT":
+                status = f"ROT_CW=0 | DEPARTURE TEXT VOTE CONFLICT -> REVIEW"
+                color = (0, 80, 255)
             else:
                 status = f"ROT_CW=0 | VAR_IND=NOT FOUND -> assumed NORTH=0 | CHECK={result.var_check} | TXT={result.text_lines}"
                 color = (0, 120, 255)

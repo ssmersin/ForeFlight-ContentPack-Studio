@@ -963,7 +963,7 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
             chosen = primary["rot"] if primary is not None else scale_rot
             refs = (primary["boxes"] if primary is not None else (vote["boxes"] if vote else [])) + scale_refs
             basis = "rma_lat+color_altitude" if primary is not None and scale_rot is not None else ("rma_lat_ticks" if primary is not None else "color_altitude")
-            return OrientationResult(chosen, "lat_labels" if primary is not None else "arrival_references",
+            return OrientationResult(chosen, "lat_labels" if primary is not None else "rma_references",
                 refs, basis=basis, var_check="RMA_REFERENCES_AGREE" if primary is not None and scale_rot is not None else "RMA_SINGLE_REFERENCE",
                 text_lines=len(lines))
         refs = list(result.references) + (vote["boxes"] if vote else []) + scale_refs
@@ -1047,7 +1047,7 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
         x0, y0, x1, y1 = TR(orig_roi.x0, orig_roi.y0, orig_roi.x1, orig_roi.y1)
         cv2.rectangle(bgr, (x0, y0), (x1, y1), (255, 110, 0), 3)
 
-        found = result.method in ("variation_indicator", "lat_labels", "arrival_references", "departure_references")
+        found = result.method in ("variation_indicator", "lat_labels", "arrival_references", "rma_references", "departure_references")
         for ref in result.references:
             if ref.kind == "lat_label":
                 lx0, ly0, lx1, ly1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
@@ -1106,6 +1106,8 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 ind = "ARRIVAL_REFERENCES"
             elif result.method == "departure_references":
                 ind = "DEPARTURE_REFERENCES"
+            elif result.method == "rma_references":
+                ind = "RMA_REFERENCES"
             else:
                 ind = "VAR_IND=NOT USED, LAT"
             if result.method in ("arrival_references", "departure_references") or not result.apply_rotation:

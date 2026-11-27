@@ -942,7 +942,14 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
         or "ARRIVAL" in (procedure or "").upper()
         or str(category or "").strip().upper() == "STAR"
     )
-    result = _detect_from_indicator(page, roi_rect, allow_unlabeled_pair=not is_arrival)
+    is_departure = (
+        str(category or "").strip().upper() in ("DEPARTURE", "SID")
+        or "DEPARTURE" in (procedure or "").upper()
+        or "SID" in (procedure or "").upper()
+    )
+    result = _detect_from_indicator(
+        page, roi_rect, allow_unlabeled_pair=not (is_arrival or is_departure)
+    )
     is_rma = (
         "RADAR MINIMUM ALTITUDE" in (procedure or "").upper()
         or "RADAR MINIMUM ALTITUDE" in (category or "").upper()
@@ -1009,11 +1016,6 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
             north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
             var_check=check, basis=result.basis, text_lines=max(result.text_lines, len(lines)),
         )
-    is_departure = (
-        str(category or "").strip().upper() in ("DEPARTURE", "SID")
-        or "DEPARTURE" in (procedure or "").upper()
-        or "SID" in (procedure or "").upper()
-    )
     if is_departure:
         return _departure_orientation(page, roi_rect)
     return result

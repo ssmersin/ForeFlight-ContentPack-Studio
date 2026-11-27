@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--diagnostic",
         action="store_true",
-        help="Export ROI overlay images to HEDEF/01-First-Diagnostic",
+        help="Export ROI and orientation diagnostic images",
     )
     return parser
 
@@ -41,7 +41,7 @@ def main() -> int:
     initial_dir = args.output.expanduser().resolve()
     first_dir = hedef_root / "01-First"
     diagnostic_dir = hedef_root / "01-First-Diagnostic"
-    turn_diag_dir = hedef_root / "02-Second-Turn-Diagnostik"
+    turn_diag_dir = hedef_root / "01-ROI-Orientation-Diagnostic"
 
     try:
         metadata = read_cover_metadata(source)
@@ -92,8 +92,10 @@ def main() -> int:
     if args.diagnostic:
         print(f"02-Turn-Diag  : {len(turn_diag_exports)}")
     print(f"Unresolved    : {len(unresolved)}")
-    print(f"Output folder : {initial_dir}")
-    print(f"Manifest      : {manifest.resolve()}")
+    print(f"Initial folder: {initial_dir}")
+    print(f"Stage 01 folder: {first_dir}")
+    print(f"Chart manifest: {manifest.resolve()}")
+    print(f"ROI manifest  : {(first_dir / 'roi_manifest.json').resolve()}")
     for page_number, reason in unresolved:
         print(f"REVIEW page {page_number}: {reason}")
     return 0 if not unresolved else 3

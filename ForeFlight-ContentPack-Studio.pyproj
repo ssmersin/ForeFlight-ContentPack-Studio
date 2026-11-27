@@ -32,7 +32,10 @@
     <Compile Include="App\dependency_setup.py" />
     <Compile Include="App\flip_parser.py" />
     <Compile Include="App\main.py" />
+    <Compile Include="App\opencv_roi.py" />
+    <Compile Include="App\orientation_turn.py" />
     <Compile Include="App\pdf_splitter.py" />
+    <Compile Include="App\planview_roi.py" />
     <Compile Include="App\tests\test_pdf_splitter.py" />
   </ItemGroup>
   <ItemGroup>

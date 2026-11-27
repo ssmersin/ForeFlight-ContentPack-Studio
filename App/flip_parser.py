@@ -11,7 +11,7 @@ from dependency_setup import ensure_poppler
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
-DEFAULT_OUTPUT = PROJECT_DIR / "HEDEF" / "Initial"
+DEFAULT_OUTPUT = PROJECT_DIR / "HEDEF" / "00-Initial"
 
 
 @dataclass
@@ -69,8 +69,8 @@ def _procedure_and_category(text: str) -> tuple[Optional[str], Optional[str]]:
         return title, "Departure"
     if "RADAR INSTRUMENT APPROACH MINIMUM" in title:
         return title, "Diagram"
-    if "RADAR MINIMUM ALTITUDE" in title:
-        return title, "Diagram"
+    if "RADAR MINIMUM ALTITUDES" in title or "RADAR MINIMUM ALTITUDE" in title:
+        return "RADAR MINIMUM ALTITUDES", "Diagram"
     if title.startswith("TAC TO PAR"):
         return title, "Approach"
     if any(token in title for token in ("TACAN", "ILS", "LOC", "RNP", "VOR", "NDB")):

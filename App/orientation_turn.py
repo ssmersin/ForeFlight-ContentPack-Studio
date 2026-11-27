@@ -825,8 +825,9 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
                                  basis="+".join(active), text_lines=len(lines),
                                  apply_rotation=False)
     rotation = rotations.pop()
+    state = "APPROACH_REFERENCES_AGREE" if len(active) > 1 else "APPROACH_SINGLE_REFERENCE"
     return OrientationResult(rotation, "approach_references", refs,
-                             var_check=f"APPROACH_REFERENCES_AGREE({detail})",
+                             var_check=f"{state}({detail})",
                              basis="+".join(active), text_lines=len(lines),
                              apply_rotation=False)
 
@@ -1347,9 +1348,6 @@ def _is_approach_item(filename: str, meta: dict) -> bool:
         or "APPROACH" in procedure
         or "INSTRUMENT APPROACH" in procedure
         or "APPROACH" in name
-        or "TACAN" in procedure
-        or "ILS" in procedure
-        or "RNAV" in procedure
     )
 
 

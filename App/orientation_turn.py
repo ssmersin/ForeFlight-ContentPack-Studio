@@ -385,6 +385,202 @@ RMA_LAT_RE = re.compile(
 )
 
 
+# ------------------------------------------------------------------ ortak chart referanslari: MSA + renk/irtifa skalasi
+ALTITUDE_FT_RE = re.compile(r"^\s*(\d{1,5})\s*(?:FT|FEET)\s*$", re.I)
+ALTITUDE_VALUE_RE = re.compile(r"^\s*(\d{3,5})\s*$")
+DISTANCE_25NM_RE = re.compile(r"\b25\s*(?:NM|N\.?M\.?)\b", re.I)
+MSA_WORD_RE = re.compile(r"\bMSA\b", re.I)
+
+
+def _line_rotation(line: dict) -> Optional[int]:
+    rot, residual = _snap_rotation(_angle_cw_from_up(*line["up"]))
+    return rot if abs(residual) <= 8.0 else None
+
+
+def _rect_inside(a: pymupdf.Rect, b: pymupdf.Rect, pad: float = 0.0) -> bool:
+    return (b.x0 - pad <= a.x0 and b.y0 - pad <= a.y0
+            and b.x1 + pad >= a.x1 and b.y1 + pad >= a.y1)
+
+
+def _filled_color_rectangles(page: pymupdf.Page, roi: pymupdf.Rect) -> list[pymupdf.Rect]:
+    """Return small filled rectangular color swatches from vector chart legends."""
+    rm = page.rotation_matrix
+    found = []
+    for drawing in page.get_drawings():
+        fill = drawing.get("fill")
+        if fill is None:
+            continue
+        for item in drawing.get("items", []):
+            if item[0] != "re":
+                continue
+            rect = pymupdf.Rect(item[1]) * rm
+            rect.normalize()
+            if not roi.contains(pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)):
+                continue
+            if 2.0 <= rect.width <= 28.0 and 2.0 <= rect.height <= 28.0:
+                found.append(rect)
+    return found
+
+
+def _group_color_swatches(rects: list[pymupdf.Rect]) -> list[pymupdf.Rect]:
+    """Group adjacent swatches into a single horizontal or vertical legend bar."""
+    groups: list[list[pymupdf.Rect]] = []
+    for rect in sorted(rects, key=lambda r: (r.y0, r.x0)):
+        placed = False
+        for group in groups:
+            g = group[0]
+            same_row = abs((rect.y0 + rect.y1 - g.y0 - g.y1) / 2) <= max(3.0, min(rect.height, g.height) * 0.45)
+            same_col = abs((rect.x0 + rect.x1 - g.x0 - g.x1) / 2) <= max(3.0, min(rect.width, g.width) * 0.45)
+            adjacent = any(
+                (abs(rect.x0 - other.x1) <= 4.0 or abs(other.x0 - rect.x1) <= 4.0)
+                and abs((rect.y0 + rect.y1 - other.y0 - other.y1) / 2) <= 4.0
+                or (abs(rect.y0 - other.y1) <= 4.0 or abs(other.y0 - rect.y1) <= 4.0)
+                and abs((rect.x0 + rect.x1 - other.x0 - other.x1) / 2) <= 4.0
+                for other in group
+            )
+            if adjacent and (same_row or same_col):
+                group.append(rect)
+                placed = True
+                break
+        if not placed:
+            groups.append([rect])
+
+    result = []
+    for group in groups:
+        if len(group) < 4:
+            continue
+        result.append(pymupdf.Rect(
+            min(r.x0 for r in group), min(r.y0 for r in group),
+            max(r.x1 for r in group), max(r.y1 for r in group),
+        ))
+    return result
+
+
+def _detect_color_altitude_scale(
+    page: pymupdf.Page, lines: list[dict], roi: pymupdf.Rect
+) -> Optional[dict]:
+    swatches = _filled_color_rectangles(page, roi)
+    groups = _group_color_swatches(swatches)
+    best = None
+    for group in groups:
+        pad = max(18.0, min(group.width, group.height) * 1.8)
+        nearby = []
+        for line in lines:
+            if not ALTITUDE_FT_RE.match(line["text"]):
+                continue
+            r = line["rect"]
+            cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+            if group.x0 - pad <= cx <= group.x1 + pad and group.y0 - pad <= cy <= group.y1 + pad:
+                rot = _line_rotation(line)
+                if rot is not None:
+                    nearby.append((rot, line))
+        if len(nearby) < 3:
+            continue
+        rotations = {rot for rot, _ in nearby}
+        if len(rotations) != 1:
+            continue
+        score = len(nearby) * 2 + len(swatches)
+        if best is None or score > best["score"]:
+            best = {"rot": rotations.pop(), "rect": group, "labels": [ln for _, ln in nearby],
+                    "score": score, "swatches": swatches}
+    return best
+
+
+def _detect_msa_reference(
+    page: pymupdf.Page, lines: list[dict], roi: pymupdf.Rect
+) -> Optional[dict]:
+    """Find a circular 25 NM MSA graphic and its central altitude label."""
+    rm = page.rotation_matrix
+    circles = []
+    for drawing in page.get_drawings():
+        items = drawing.get("items", [])
+        if not any(item[0] in ("c", "qu") for item in items):
+            continue
+        rect = pymupdf.Rect(drawing.get("rect", (0, 0, 0, 0))) * rm
+        rect.normalize()
+        if not roi.contains(pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)):
+            continue
+        if rect.width < 35.0 or rect.height < 35.0 or rect.width > 190.0 or rect.height > 190.0:
+            continue
+        if not 0.78 <= rect.width / max(rect.height, 0.01) <= 1.28:
+            continue
+        circles.append(rect)
+
+    best = None
+    for circle in circles:
+        nearby_text = []
+        altitude_lines = []
+        for line in lines:
+            r = line["rect"]
+            cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+            if circle.x0 - 12 <= cx <= circle.x1 + 12 and circle.y0 - 12 <= cy <= circle.y1 + 12:
+                nearby_text.append(line)
+                if ALTITUDE_VALUE_RE.match(line["text"]) and circle.x0 + circle.width * 0.25 <= cx <= circle.x0 + circle.width * 0.75 and circle.y0 + circle.height * 0.25 <= cy <= circle.y0 + circle.height * 0.75:
+                    altitude_lines.append(line)
+        has_range = any(DISTANCE_25NM_RE.search(line["text"]) for line in lines
+                        if math.hypot((line["rect"].x0 + line["rect"].x1) / 2 - (circle.x0 + circle.x1) / 2,
+                                      (line["rect"].y0 + line["rect"].y1) / 2 - (circle.y0 + circle.y1) / 2) <= 100.0)
+        has_msa = any(MSA_WORD_RE.search(line["text"]) for line in nearby_text)
+        if not altitude_lines or not (has_range or has_msa):
+            continue
+        valid = [(rot, line) for line in altitude_lines if (rot := _line_rotation(line)) is not None]
+        if not valid:
+            continue
+        rotations = {rot for rot, _ in valid}
+        if len(rotations) != 1:
+            continue
+        score = 8 + len(valid) * 2 + (4 if has_range else 0) + (4 if has_msa else 0)
+        if best is None or score > best["score"]:
+            best = {"rot": rotations.pop(), "rect": circle, "labels": [ln for _, ln in valid],
+                    "score": score, "nearby": nearby_text}
+    return best
+
+
+def _detect_arrival_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationResult:
+    lines = _collect_text_lines(page, roi)
+    msa = _detect_msa_reference(page, lines, roi)
+    scale = _detect_color_altitude_scale(page, lines, roi)
+    refs: list[ReferenceBox] = []
+    votes: list[tuple[str, int, float]] = []
+
+    if msa:
+        r = msa["rect"]
+        refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, msa["rot"], 8.0, "msa_circle", "MSA 25 NM"))
+        for line in msa["labels"]:
+            r = line["rect"]
+            refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, msa["rot"], 6.0, "msa_label", line["text"]))
+        votes.append(("MSA", msa["rot"], msa["score"]))
+
+    if scale:
+        r = scale["rect"]
+        refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, scale["rot"], 8.0, "altitude_scale", "COLOR / ALTITUDE SCALE"))
+        for line in scale["labels"]:
+            r = line["rect"]
+            refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, scale["rot"], 6.0, "altitude_scale_label", line["text"]))
+        votes.append(("SCALE", scale["rot"], scale["score"]))
+        # Include individual color swatches for visual confirmation.
+        for swatch in scale["swatches"]:
+            if _overlap(swatch, r):
+                refs.append(ReferenceBox(swatch.x0, swatch.y0, swatch.x1, swatch.y1,
+                                         scale["rot"], 2.0, "altitude_swatch", "COLOR SWATCH"))
+
+    if not votes:
+        return OrientationResult(0, "none", refs, var_check="ARRIVAL_REFERENCES_NOT_FOUND",
+                                 basis="msa+color_altitude", text_lines=len(lines))
+    rotations = {rot for _, rot, _ in votes}
+    if len(rotations) != 1:
+        details = ",".join(f"{name}={rot}" for name, rot, _ in votes)
+        return OrientationResult(0, "none", refs, var_check=f"ARRIVAL_REFERENCE_CONFLICT({details})",
+                                 basis="msa+color_altitude", text_lines=len(lines))
+    rotation = rotations.pop()
+    basis = "+".join(name.lower() for name, _, _ in votes)
+    check = f"ARRIVAL_AGREE({basis})" if len(votes) > 1 else f"ARRIVAL_SINGLE({basis})"
+    return OrientationResult(rotation, "arrival_references", refs, var_check=check,
+                             basis=basis, text_lines=len(lines))
+
+
+
+
 def _find_rma_latitude_vote(
     page: pymupdf.Page,
     lines: list[dict],
@@ -616,6 +812,29 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
         "RADAR MINIMUM ALTITUDE" in (procedure or "").upper()
         or "RADAR MINIMUM ALTITUDE" in (category or "").upper()
     )
+    is_arrival = (
+        str(category or "").strip().upper() == "ARRIVAL"
+        or "ARRIVAL" in (procedure or "").upper()
+        or (str(category or "").strip().upper() == "STAR")
+    )
+    if is_arrival:
+        arrival = _detect_arrival_orientation(page, roi_rect)
+        # Keep VAR-North as a first-class reusable reference and the strongest
+        # authority when present. Arrival's MSA/scale detectors remain independent.
+        if result.method == "variation_indicator":
+            refs = result.references + arrival.references
+            check = result.var_check
+            if arrival.method == "arrival_references":
+                if arrival.rotation_cw == result.rotation_cw:
+                    check += f"; {arrival.var_check}"
+                else:
+                    check += f"; {arrival.var_check}; VAR_WINS"
+            return OrientationResult(
+                result.rotation_cw, result.method, refs, var_text=result.var_text, year=result.year,
+                north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
+                var_check=check, basis=result.basis, text_lines=max(result.text_lines, arrival.text_lines),
+            )
+        return arrival
     if is_rma:
         lines = _collect_text_lines(page, roi_rect)
         vote = _find_rma_latitude_vote(page, lines, roi_rect)
@@ -697,7 +916,7 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
         x0, y0, x1, y1 = TR(orig_roi.x0, orig_roi.y0, orig_roi.x1, orig_roi.y1)
         cv2.rectangle(bgr, (x0, y0), (x1, y1), (255, 110, 0), 3)
 
-        found = result.method in ("variation_indicator", "lat_labels")
+        found = result.method in ("variation_indicator", "lat_labels", "arrival_references")
         for ref in result.references:
             if ref.kind == "lat_label":
                 lx0, ly0, lx1, ly1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
@@ -712,6 +931,30 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 p, q = T(ref.line[0], ref.line[1]), T(ref.line[2], ref.line[3])
                 cv2.arrowedLine(bgr, p, q, (200, 0, 200), 3, cv2.LINE_AA, tipLength=0.3)
                 continue
+            if ref.kind == "msa_circle":
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                cv2.rectangle(bgr, (bx0, by0), (bx1, by1), (0, 210, 255), 3)
+                cv2.putText(bgr, "MSA REFERENCE", (bx0, max(18, by0 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 170, 255), 2, cv2.LINE_AA)
+                continue
+            if ref.kind == "msa_label":
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                cv2.rectangle(bgr, (bx0 - 3, by0 - 3), (bx1 + 3, by1 + 3), (0, 210, 255), 2)
+                continue
+            if ref.kind == "altitude_scale":
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                cv2.rectangle(bgr, (bx0, by0), (bx1, by1), (255, 180, 0), 3)
+                cv2.putText(bgr, "COLOR / ALTITUDE SCALE", (bx0, max(18, by0 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 0), 2, cv2.LINE_AA)
+                continue
+            if ref.kind == "altitude_scale_label":
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                cv2.rectangle(bgr, (bx0 - 3, by0 - 3), (bx1 + 3, by1 + 3), (255, 180, 0), 2)
+                continue
+            if ref.kind == "altitude_swatch":
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                cv2.rectangle(bgr, (bx0, by0), (bx1, by1), (255, 0, 180), 2)
+                continue
             bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
             bx0, by0 = max(0, bx0 - 6), max(0, by0 - 6)
             bx1, by1 = min(W - 1, bx1 + 6), min(H - 1, by1 + 6)
@@ -722,7 +965,12 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
         if found:
             ang = "" if result.north_angle_deg is None else f" | NORTH={result.north_angle_deg:.0f}deg resid={result.residual_deg:+.0f}"
             ang += f" | TXT={result.text_lines}"
-            ind = "VAR_IND=FOUND" if result.method == "variation_indicator" else "VAR_IND=NOT USED, LAT"
+            if result.method == "variation_indicator":
+                ind = "VAR_IND=FOUND"
+            elif result.method == "arrival_references":
+                ind = "ARRIVAL_REFERENCES"
+            else:
+                ind = "VAR_IND=NOT USED, LAT"
             status = f"ROT_CW={rot_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
             color = (0, 0, 220) if rot_cw else (0, 140, 0)
         else:
@@ -751,6 +999,13 @@ def _is_radar_minimum_altitudes_item(filename: str, meta: dict) -> bool:
     return "RADAR MINIMUM ALTITUDE" in procedure or "RADAR MINIMUM ALTITUDE" in filename.upper()
 
 
+
+def _is_arrival_item(filename: str, meta: dict) -> bool:
+    category = str(meta.get("category", "")).strip().upper()
+    procedure = str(meta.get("procedure", "")).strip().upper()
+    return category in ("ARRIVAL", "STAR") or "ARRIVAL" in procedure or "STAR" in procedure
+
+
 def run_second_stage_orientation_turn(
     first_dir: Path,
     second_dir: Path,
@@ -777,6 +1032,7 @@ def run_second_stage_orientation_turn(
         if only_aerodrome_diagrams and not (
             _is_aerodrome_diagram_item(filename, meta)
             or _is_radar_minimum_altitudes_item(filename, meta)
+            or _is_arrival_item(filename, meta)
         ):
             continue
         src_pdf = first_dir / filename

@@ -381,7 +381,7 @@ def _pair_has_text_signature(pair: dict, lines: list[dict]) -> bool:
 
 RMA_LAT_RE = re.compile(
     r"^\s*(\d{1,2})(?:\s*[°º˚]\s*|\s*[-–]\s*)(\d{1,2})?"
-    r"(?:\s*['′’])?\s*(?:[°º˚])?\s*N\s*$", re.I
+    r"(?:\s*['′’])?\s*(?:[°º˚])?\s*N?\s*$", re.I
 )
 
 
@@ -397,7 +397,7 @@ def _find_rma_latitude_vote(
         return None
 
     segments, _ = _collect_segments(page, roi_rect)
-    edge_tol = max(8.0, min(16.0, min(width, height) * 0.012))
+    edge_tol = max(12.0, min(28.0, min(width, height) * 0.025))
     candidates = []
 
     for line in lines:
@@ -599,8 +599,33 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
         "RADAR MINIMUM ALTITUDE" in (procedure or "").upper()
         or "RADAR MINIMUM ALTITUDE" in (category or "").upper()
     )
-    if is_rma and result.method == "none":
-        return _detect_rma_orientation(page, roi_rect)
+    if is_rma:
+        lines = _collect_text_lines(page, roi_rect)
+        vote = _find_rma_latitude_vote(page, lines, roi_rect)
+        if result.method == "none":
+            if vote is None:
+                return OrientationResult(0, "none", [], var_check="RMA_LAT_NOT_FOUND", text_lines=len(lines))
+            if vote["ignored"]:
+                return OrientationResult(0, "none", vote["boxes"], var_check="RMA_LAT_CONFLICT", text_lines=len(lines))
+            return OrientationResult(
+                vote["rot"], "lat_labels", vote["boxes"],
+                basis=f"rma_lat_ticks(n={vote['n']})",
+                var_check=f"RMA_LAT_OK(n={vote['n']})", text_lines=len(lines),
+            )
+        if vote is not None:
+            check = result.var_check
+            if vote["ignored"]:
+                check = f"{check}; RMA_LAT_CONFLICT"
+            elif vote["rot"] == result.rotation_cw:
+                check = f"{check}; RMA_LAT_AGREE(n={vote['n']})"
+            else:
+                check = f"{check}; RMA_LAT_CONFLICT(lat={vote['rot']}) -> VAR wins"
+            result = OrientationResult(
+                result.rotation_cw, result.method, result.references + vote["boxes"],
+                var_text=result.var_text, year=result.year,
+                north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
+                var_check=check, basis=result.basis, text_lines=max(result.text_lines, len(lines)),
+            )
     return result
 
 

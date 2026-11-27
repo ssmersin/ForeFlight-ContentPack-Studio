@@ -378,6 +378,149 @@ def _pair_has_text_signature(pair: dict, lines: list[dict]) -> bool:
     return sum(1 for l in near if abs((_angle_cw_from_up(*l["up"]) - base + 180) % 360 - 180) <= 8.0) >= 3
 
 
+
+RMA_LAT_RE = re.compile(
+    r"^\s*(\d{1,2})(?:\s*[°º˚]\s*|\s*[-–]\s*)(\d{1,2})?"
+    r"(?:\s*['′’])?\s*(?:[°º˚])?\s*N\s*$", re.I
+)
+
+
+def _find_rma_latitude_vote(
+    page: pymupdf.Page,
+    lines: list[dict],
+    roi_rect: pymupdf.Rect,
+) -> Optional[dict]:
+    """RMA latitude references: coordinate label + edge tick, optionally corroborated
+    by the tick on the opposite ROI edge at the same pixel row/column."""
+    width, height = roi_rect.width, roi_rect.height
+    if width <= 0 or height <= 0:
+        return None
+
+    segments, _ = _collect_segments(page, roi_rect)
+    edge_tol = max(8.0, min(16.0, min(width, height) * 0.012))
+    candidates = []
+
+    for line in lines:
+        if not RMA_LAT_RE.match(line["text"].strip()):
+            continue
+
+        rect = line["rect"]
+        cx = (rect.x0 + rect.x1) / 2.0
+        cy = (rect.y0 + rect.y1) / 2.0
+        rot, residual = _snap_rotation(_angle_cw_from_up(*line["up"]))
+        if abs(residual) > 8.0:
+            continue
+
+        # Coordinate labels sit beside one of the four ROI edges. The associated
+        # tick must be a short vector touching that same edge and coordinate.
+        edge_distances = {
+            "left": abs(cx - roi_rect.x0),
+            "right": abs(roi_rect.x1 - cx),
+            "top": abs(cy - roi_rect.y0),
+            "bottom": abs(roi_rect.y1 - cy),
+        }
+        edge = min(edge_distances, key=edge_distances.get)
+        if edge_distances[edge] > max(42.0, min(width, height) * 0.07):
+            continue
+
+        along = cy if edge in ("left", "right") else cx
+        near_ticks = []
+        for seg in segments:
+            x0, y0, x1, y1 = seg
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (1.5 <= length <= 16.0):
+                continue
+            mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            seg_along = my if edge in ("left", "right") else mx
+            if abs(seg_along - along) > max(8.0, rect.height * 0.9 if edge in ("left", "right") else rect.width * 0.9):
+                continue
+            if edge == "left":
+                edge_gap = abs(mx - roi_rect.x0)
+                perpendicular = abs(x1 - x0) >= abs(y1 - y0) * 1.5
+            elif edge == "right":
+                edge_gap = abs(mx - roi_rect.x1)
+                perpendicular = abs(x1 - x0) >= abs(y1 - y0) * 1.5
+            elif edge == "top":
+                edge_gap = abs(my - roi_rect.y0)
+                perpendicular = abs(y1 - y0) >= abs(x1 - x0) * 1.5
+            else:
+                edge_gap = abs(my - roi_rect.y1)
+                perpendicular = abs(y1 - y0) >= abs(x1 - x0) * 1.5
+            if perpendicular and edge_gap <= edge_tol:
+                near_ticks.append((edge_gap + abs(seg_along - along), seg))
+
+        if not near_ticks:
+            continue
+        near_ticks.sort(key=lambda item: item[0])
+        own_tick = near_ticks[0][1]
+
+        # Opposite-side tick is optional; when present it must share the same
+        # row/column within a small tolerance.
+        opposite_edge = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}[edge]
+        opposite_ticks = []
+        for seg in segments:
+            x0, y0, x1, y1 = seg
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (1.5 <= length <= 16.0):
+                continue
+            mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            seg_along = my if edge in ("left", "right") else mx
+            if abs(seg_along - along) > 4.5:
+                continue
+            if opposite_edge == "left":
+                gap = abs(mx - roi_rect.x0)
+                orientation_ok = abs(x1 - x0) >= abs(y1 - y0) * 1.5
+            elif opposite_edge == "right":
+                gap = abs(mx - roi_rect.x1)
+                orientation_ok = abs(x1 - x0) >= abs(y1 - y0) * 1.5
+            elif opposite_edge == "top":
+                gap = abs(my - roi_rect.y0)
+                orientation_ok = abs(y1 - y0) >= abs(x1 - x0) * 1.5
+            else:
+                gap = abs(my - roi_rect.y1)
+                orientation_ok = abs(y1 - y0) >= abs(x1 - x0) * 1.5
+            if orientation_ok and gap <= edge_tol:
+                opposite_ticks.append((gap, seg))
+
+        opposite_tick = min(opposite_ticks, key=lambda item: item[0])[1] if opposite_ticks else None
+        score = 10.0 + (5.0 if opposite_tick is not None else 0.0) - near_ticks[0][0] * 0.05
+        candidates.append({
+            "rot": rot, "rect": rect, "tick": own_tick,
+            "opposite_tick": opposite_tick, "score": score,
+        })
+
+    if not candidates:
+        return None
+
+    rotations = {item["rot"] for item in candidates}
+    boxes = []
+    for item in candidates:
+        r = item["rect"]
+        boxes.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, item["rot"], 5.0, "lat_label", "RMA LAT"))
+        for kind, seg in (("lat_tick", item["tick"]), ("lat_opposite_tick", item["opposite_tick"])):
+            if seg is not None:
+                x0, y0, x1, y1 = seg
+                boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+                                          item["rot"], 3.0, kind, "LAT TICK"))
+    if len(rotations) != 1:
+        return {"rot": None, "n": len(candidates), "boxes": boxes, "ignored": True}
+    return {"rot": rotations.pop(), "n": len(candidates), "boxes": boxes, "ignored": False}
+
+
+def _detect_rma_orientation(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> OrientationResult:
+    lines = _collect_text_lines(page, roi_rect)
+    vote = _find_rma_latitude_vote(page, lines, roi_rect)
+    if vote is None:
+        return OrientationResult(0, "none", [], var_check="RMA_LAT_NOT_FOUND", text_lines=len(lines))
+    if vote["ignored"]:
+        return OrientationResult(0, "none", vote["boxes"], var_check="RMA_LAT_CONFLICT", text_lines=len(lines))
+    return OrientationResult(
+        vote["rot"], "lat_labels", vote["boxes"],
+        basis=f"rma_lat_ticks(n={vote['n']})",
+        var_check=f"RMA_LAT_OK(n={vote['n']})", text_lines=len(lines),
+    )
+
+
 def _detect_from_indicator(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> OrientationResult:
     lines = _collect_text_lines(page, roi_rect)
     ind = _find_indicator_text(lines)
@@ -449,9 +592,16 @@ def _detect_from_indicator(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> Orient
 
 
 def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedure: str = "") -> OrientationResult:
-    """Yalnizca ROI icindeki variation-north gostergesine bakar; yoksa North=0."""
-    del category, procedure
-    return _detect_from_indicator(page, _resolve_roi_rect(page, roi))
+    """Use VAR-North for all supported charts; RMA additionally uses edge LAT ticks."""
+    roi_rect = _resolve_roi_rect(page, roi)
+    result = _detect_from_indicator(page, roi_rect)
+    is_rma = (
+        "RADAR MINIMUM ALTITUDE" in (procedure or "").upper()
+        or "RADAR MINIMUM ALTITUDE" in (category or "").upper()
+    )
+    if is_rma and result.method == "none":
+        return _detect_rma_orientation(page, roi_rect)
+    return result
 
 
 # ------------------------------------------------------------------ donusum
@@ -511,6 +661,11 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 lx0, ly0, lx1, ly1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 cv2.rectangle(bgr, (lx0 - 4, ly0 - 4), (lx1 + 4, ly1 + 4), (0, 170, 0), 2)
                 continue
+            if ref.kind in ("lat_tick", "lat_opposite_tick"):
+                tx0, ty0, tx1, ty1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                color = (0, 165, 255) if ref.kind == "lat_tick" else (255, 0, 255)
+                cv2.line(bgr, (tx0, ty0), (tx1, ty1), color, 4, cv2.LINE_AA)
+                continue
             if ref.kind == "arrow_axis" and ref.line:
                 p, q = T(ref.line[0], ref.line[1]), T(ref.line[2], ref.line[3])
                 cv2.arrowedLine(bgr, p, q, (200, 0, 200), 3, cv2.LINE_AA, tipLength=0.3)
@@ -549,6 +704,11 @@ def _is_aerodrome_diagram_item(filename: str, meta: dict) -> bool:
     )
 
 
+def _is_radar_minimum_altitudes_item(filename: str, meta: dict) -> bool:
+    procedure = str(meta.get("procedure", "")).strip().upper()
+    return "RADAR MINIMUM ALTITUDE" in procedure or "RADAR MINIMUM ALTITUDE" in filename.upper()
+
+
 def run_second_stage_orientation_turn(
     first_dir: Path,
     second_dir: Path,
@@ -572,7 +732,10 @@ def run_second_stage_orientation_turn(
     remaining: dict[str, dict] = dict(records)
 
     for filename, meta in records.items():
-        if only_aerodrome_diagrams and not _is_aerodrome_diagram_item(filename, meta):
+        if only_aerodrome_diagrams and not (
+            _is_aerodrome_diagram_item(filename, meta)
+            or _is_radar_minimum_altitudes_item(filename, meta)
+        ):
             continue
         src_pdf = first_dir / filename
         if not src_pdf.is_file():

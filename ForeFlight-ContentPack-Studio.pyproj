@@ -36,6 +36,7 @@
     <Compile Include="App\orientation_turn.py" />
     <Compile Include="App\pdf_splitter.py" />
     <Compile Include="App\planview_roi.py" />
+    <Compile Include="App\roi_orientation_pipeline.py" />
     <Compile Include="App\tests\test_pdf_splitter.py" />
     <Compile Include="App\tests\test_orientation_turn_features.py" />
   </ItemGroup>

@@ -735,7 +735,9 @@ def _detect_rma_orientation(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> Orien
     )
 
 
-def _detect_from_indicator(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> OrientationResult:
+def _detect_from_indicator(
+    page: pymupdf.Page, roi_rect: pymupdf.Rect, allow_unlabeled_pair: bool = True
+) -> OrientationResult:
     lines = _collect_text_lines(page, roi_rect)
     ind = _find_indicator_text(lines)
     n_letters = [l for l in lines if l["text"].upper() == "N"]
@@ -745,7 +747,7 @@ def _detect_from_indicator(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> Orient
         n_near = [n for n in n_letters if _overlap(n["rect"], region)]
     else:
         region, n_near = roi_rect, n_letters
-    pair = _find_arrow_pair(page, region, n_near, wide=ind is None)
+    pair = _find_arrow_pair(page, region, n_near, wide=ind is None) if (ind is not None or allow_unlabeled_pair) else None
     lat = _lat_label_vote(lines)
     lat_boxes = [ReferenceBox(r.x0, r.y0, r.x1, r.y1, 0, 5.0, "lat_label", "LAT") for r in (lat["boxes"] if lat else [])]
 
@@ -808,15 +810,15 @@ def _detect_from_indicator(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> Orient
 def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedure: str = "") -> OrientationResult:
     """Use VAR-North for all supported charts; RMA additionally uses edge LAT ticks."""
     roi_rect = _resolve_roi_rect(page, roi)
-    result = _detect_from_indicator(page, roi_rect)
-    is_rma = (
-        "RADAR MINIMUM ALTITUDE" in (procedure or "").upper()
-        or "RADAR MINIMUM ALTITUDE" in (category or "").upper()
-    )
     is_arrival = (
         str(category or "").strip().upper() == "ARRIVAL"
         or "ARRIVAL" in (procedure or "").upper()
-        or (str(category or "").strip().upper() == "STAR")
+        or str(category or "").strip().upper() == "STAR"
+    )
+    result = _detect_from_indicator(page, roi_rect, allow_unlabeled_pair=not is_arrival)
+    is_rma = (
+        "RADAR MINIMUM ALTITUDE" in (procedure or "").upper()
+        or "RADAR MINIMUM ALTITUDE" in (category or "").upper()
     )
     if is_arrival:
         arrival = _detect_arrival_orientation(page, roi_rect)

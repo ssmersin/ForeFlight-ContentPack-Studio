@@ -397,6 +397,23 @@ def _find_rma_latitude_vote(
         return None
 
     segments, _ = _collect_segments(page, roi_rect)
+    # Some FLIP exports encode fine ticks as very thin rectangle strokes rather
+    # than line primitives; normalize those rectangles into short center lines.
+    rm = page.rotation_matrix
+    for drawing in page.get_drawings():
+        for item in drawing.get("items", []):
+            if item[0] != "re":
+                continue
+            rect = pymupdf.Rect(item[1]) * rm
+            rect.normalize()
+            if not roi_rect.intersects(rect):
+                continue
+            if rect.width <= 16.0 and rect.height <= 2.5 and rect.width >= 1.5:
+                segments.append((rect.x0, (rect.y0 + rect.y1) / 2.0,
+                                 rect.x1, (rect.y0 + rect.y1) / 2.0))
+            elif rect.height <= 16.0 and rect.width <= 2.5 and rect.height >= 1.5:
+                segments.append(((rect.x0 + rect.x1) / 2.0, rect.y0,
+                                 (rect.x0 + rect.x1) / 2.0, rect.y1))
     edge_tol = max(12.0, min(28.0, min(width, height) * 0.025))
     candidates = []
 

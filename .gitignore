@@ -7,3 +7,6 @@
 /__pycache__
 /Kitap.pdf
 /HEDEF
+/App/__pycache__/orientation_turn.cpython-314.pyc
+/App/__pycache__/flip_parser.cpython-314.pyc
+/App/tests/__pycache__

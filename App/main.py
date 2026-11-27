@@ -8,8 +8,7 @@ from pathlib import Path
 from cover_metadata import read_cover_metadata
 from flip_parser import inspect_pdf
 from pdf_splitter import split_chart_pages
-from planview_roi import run_first_stage_planview_charts
-from orientation_turn import run_second_stage_orientation_turn
+from roi_orientation_pipeline import run_combined_roi_orientation_stage
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,7 +41,6 @@ def main() -> int:
     initial_dir = args.output.expanduser().resolve()
     first_dir = hedef_root / "01-First"
     diagnostic_dir = hedef_root / "01-First-Diagnostic"
-    second_dir = hedef_root / "02-Second-Turn"
     turn_diag_dir = hedef_root / "02-Second-Turn-Diagnostik"
 
     try:

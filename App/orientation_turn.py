@@ -489,23 +489,39 @@ def _detect_color_altitude_scale(
     for group in groups:
         pad = max(18.0, min(group.width, group.height) * 1.8)
         nearby = []
+        vertical = group.height >= group.width
+        major = group.height if vertical else group.width
+        minor = group.width if vertical else group.height
         for line in lines:
             if not ALTITUDE_FT_RE.match(line["text"]):
                 continue
             r = line["rect"]
             cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
-            if group.x0 - pad <= cx <= group.x1 + pad and group.y0 - pad <= cy <= group.y1 + pad:
+            if vertical:
+                along = cy - group.y0
+                cross = min(abs(cx - group.x0), abs(cx - group.x1))
+                in_major = group.y0 - pad <= cy <= group.y1 + pad
+            else:
+                along = cx - group.x0
+                cross = min(abs(cy - group.y0), abs(cy - group.y1))
+                in_major = group.x0 - pad <= cx <= group.x1 + pad
+            # Altitude labels must sit beside the legend and be distributed
+            # along its long axis, not merely happen to be nearby.
+            if in_major and cross <= max(12.0, minor * 1.8):
                 rot = _line_rotation(line)
                 if rot is not None:
-                    nearby.append((rot, line))
+                    nearby.append((rot, line, along))
         if len(nearby) < 3:
             continue
-        rotations = {rot for rot, _ in nearby}
+        positions = sorted(item[2] for item in nearby)
+        if positions[-1] - positions[0] < major * 0.50:
+            continue
+        rotations = {rot for rot, _, _ in nearby}
         if len(rotations) != 1:
             continue
-        score = len(nearby) * 2 + len(swatches)
+        score = len(nearby) * 3 + min(major, 100.0)
         if best is None or score > best["score"]:
-            best = {"rot": rotations.pop(), "rect": group, "labels": [ln for _, ln in nearby],
+            best = {"rot": rotations.pop(), "rect": group, "labels": [ln for _, ln, _ in nearby],
                     "score": score, "swatches": swatches}
     return best
 
@@ -707,6 +723,112 @@ def _detect_arrival_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> Orient
                              basis=basis, text_lines=len(lines), apply_rotation=False)
 
 
+
+
+APPROACH_COORD_RE = re.compile(
+    r"\b\d{1,2}[- ]\d{2}(?:[- ]\d{2}(?:\.\d+)?)?\s*[NS]\b.*"
+    r"\b\d{2,3}[- ]\d{2}(?:[- ]\d{2}(?:\.\d+)?)?\s*[EW]\b", re.I
+)
+APPROACH_ANCHOR_RE = re.compile(
+    r"\b(?:EMG\s*SAFE\s*ALT|CAUTION|IAF|IF|FAF|MAPt|S/S|HOLDING|HOLD)\b", re.I
+)
+
+
+def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationResult:
+    lines = _collect_text_lines(page, roi)
+    segments, _ = _collect_segments(page, roi)
+    route_like = [
+        seg for seg in segments
+        if math.hypot(seg[2] - seg[0], seg[3] - seg[1]) >= 38.0
+        and not (
+            (abs(seg[0] - roi.x0) < 4 and abs(seg[2] - roi.x0) < 4)
+            or (abs(seg[0] - roi.x1) < 4 and abs(seg[2] - roi.x1) < 4)
+            or (abs(seg[1] - roi.y0) < 4 and abs(seg[3] - roi.y0) < 4)
+            or (abs(seg[1] - roi.y1) < 4 and abs(seg[3] - roi.y1) < 4)
+        )
+    ]
+
+    refs: list[ReferenceBox] = []
+    votes: dict[str, list[int]] = {"EMG_SAFE_ALT": [], "PROCEDURE_BOX": [], "IAF_COORD": [], "TERRAIN": []}
+    used: set[int] = set()
+
+    for idx, line in enumerate(lines):
+        text = line["text"].strip()
+        compact = re.sub(r"\s+", " ", text).upper()
+        rect = line["rect"]
+        cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
+        if any(_pt_seg_dist(cx, cy, *seg) < 20.0 for seg in route_like):
+            continue
+        rot = _line_rotation(line)
+        if rot is None:
+            continue
+
+        if re.search(r"EMG\s*SAFE\s*ALT", compact, re.I):
+            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 8.0,
+                                     "approach_emg", text))
+            votes["EMG_SAFE_ALT"].append(rot)
+            used.add(idx)
+        elif re.search(r"\b(?:CAUTION|S/S|HOLDING|HOLD)\b", compact, re.I):
+            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 5.0,
+                                     "approach_box_text", text))
+            votes["PROCEDURE_BOX"].append(rot)
+            used.add(idx)
+        elif re.search(r"\b(?:IAF|IF|FAF|MAPt)\b", compact, re.I) or APPROACH_COORD_RE.search(compact):
+            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 7.0,
+                                     "approach_iaf", text))
+            votes["IAF_COORD"].append(rot)
+            used.add(idx)
+
+    # Terrain/obstacle heights are only supporting evidence. Exclude procedure
+    # altitude labels and anything close to route vectors.
+    for idx, line in enumerate(lines):
+        if idx in used:
+            continue
+        text = line["text"].strip()
+        if not (ALTITUDE_FT_RE.match(text) or ALTITUDE_VALUE_RE.match(text)):
+            continue
+        rect = line["rect"]
+        cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
+        if any(_pt_seg_dist(cx, cy, *seg) < 24.0 for seg in route_like):
+            continue
+        rot = _line_rotation(line)
+        if rot is None:
+            continue
+        # Require a nearby terrain/obstacle cue; bare procedure altitudes are
+        # deliberately not treated as terrain.
+        nearby = [
+            other for other in lines if other is not line
+            and math.hypot(
+                (other["rect"].x0 + other["rect"].x1) / 2.0 - cx,
+                (other["rect"].y0 + other["rect"].y1) / 2.0 - cy,
+            ) <= 24.0
+            and re.search(r"\b(?:MT|MOUNTAIN|PEAK|OBST|ELEV|ALT)\b", other["text"], re.I)
+        ]
+        if nearby:
+            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 3.0,
+                                     "approach_terrain", text))
+            votes["TERRAIN"].append(rot)
+
+    active = {name: values for name, values in votes.items() if values}
+    if not active:
+        return OrientationResult(0, "none", refs, var_check="APPROACH_REFERENCES_NOT_FOUND",
+                                 basis="emg+procedure_boxes+iaf+terrain", text_lines=len(lines))
+
+    # Each reference family casts one vote; repeated labels in one family do
+    # not outweigh a conflicting independent family.
+    family_rotations = {name: max(set(values), key=values.count) for name, values in active.items()}
+    rotations = set(family_rotations.values())
+    detail = ",".join(f"{name}={rot}" for name, rot in family_rotations.items())
+    if len(rotations) != 1:
+        return OrientationResult(0, "approach_references", refs,
+                                 var_check=f"APPROACH_REFERENCE_CONFLICT({detail})",
+                                 basis="+".join(active), text_lines=len(lines),
+                                 apply_rotation=False)
+    rotation = rotations.pop()
+    return OrientationResult(rotation, "approach_references", refs,
+                             var_check=f"APPROACH_REFERENCES_AGREE({detail})",
+                             basis="+".join(active), text_lines=len(lines),
+                             apply_rotation=False)
 
 
 def _find_rma_latitude_vote(
@@ -947,6 +1069,13 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
         or "DEPARTURE" in (procedure or "").upper()
         or "SID" in (procedure or "").upper()
     )
+    is_approach = (
+        str(category or "").strip().upper() in ("APPROACH", "IAP")
+        or "APPROACH" in (procedure or "").upper()
+        or "INSTRUMENT APPROACH" in (procedure or "").upper()
+    )
+    if is_approach:
+        return _approach_orientation(page, roi_rect)
     result = _detect_from_indicator(
         page, roi_rect, allow_unlabeled_pair=not (is_arrival or is_departure)
     )
@@ -1072,7 +1201,7 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
         x0, y0, x1, y1 = TR(orig_roi.x0, orig_roi.y0, orig_roi.x1, orig_roi.y1)
         cv2.rectangle(bgr, (x0, y0), (x1, y1), (255, 110, 0), 3)
 
-        found = result.method in ("variation_indicator", "lat_labels", "arrival_references", "rma_references", "departure_references")
+        found = result.method in ("variation_indicator", "lat_labels", "arrival_references", "rma_references", "departure_references", "approach_references")
         for ref in result.references:
             if ref.kind == "lat_label":
                 lx0, ly0, lx1, ly1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
@@ -1111,6 +1240,16 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 cv2.rectangle(bgr, (bx0, by0), (bx1, by1), (255, 0, 180), 2)
                 continue
+            if ref.kind in ("approach_emg", "approach_box_text", "approach_iaf", "approach_terrain"):
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                color = {
+                    "approach_emg": (0, 0, 255),
+                    "approach_box_text": (255, 0, 220),
+                    "approach_iaf": (0, 210, 0),
+                    "approach_terrain": (0, 165, 255),
+                }[ref.kind]
+                cv2.rectangle(bgr, (bx0 - 3, by0 - 3), (bx1 + 3, by1 + 3), color, 2)
+                continue
             if ref.kind == "departure_text":
                 bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 cv2.rectangle(bgr, (bx0 - 3, by0 - 3), (bx1 + 3, by1 + 3), (0, 220, 0), 2)
@@ -1131,12 +1270,15 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 ind = "ARRIVAL_REFERENCES"
             elif result.method == "departure_references":
                 ind = "DEPARTURE_REFERENCES"
+            elif result.method == "approach_references":
+                ind = "APPROACH_REFERENCES"
             elif result.method == "rma_references":
                 ind = "RMA_REFERENCES"
             else:
                 ind = "VAR_IND=NOT USED, LAT"
-            if result.method in ("arrival_references", "departure_references") or not result.apply_rotation:
-                stage_name = "DEPARTURE" if result.method == "departure_references" else "ARRIVAL"
+            if result.method in ("arrival_references", "departure_references", "approach_references") or not result.apply_rotation:
+                stage_name = ("DEPARTURE" if result.method == "departure_references" else
+                              "APPROACH" if result.method == "approach_references" else "ARRIVAL")
                 status = f"{stage_name} PREVIEW ONLY | PROPOSED_CW={result.rotation_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
             else:
                 status = f"ROT_CW={rot_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
@@ -1157,6 +1299,12 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
             elif result.var_check == "DEPARTURE_TEXT_CONFLICT":
                 status = f"ROT_CW=0 | DEPARTURE TEXT VOTE CONFLICT -> REVIEW"
                 color = (0, 80, 255)
+            elif result.var_check.startswith("APPROACH_REFERENCE_CONFLICT"):
+                status = f"ROT_CW=0 | APPROACH REFERENCE CONFLICT -> REVIEW | {result.var_check}"
+                color = (0, 80, 255)
+            elif result.var_check == "APPROACH_REFERENCES_NOT_FOUND":
+                status = f"ROT_CW=0 | APPROACH REFERENCES NOT FOUND | TXT={result.text_lines}"
+                color = (0, 120, 255)
             else:
                 status = f"ROT_CW=0 | VAR_IND=NOT FOUND -> assumed NORTH=0 | CHECK={result.var_check} | TXT={result.text_lines}"
                 color = (0, 120, 255)
@@ -1188,6 +1336,21 @@ def _is_arrival_item(filename: str, meta: dict) -> bool:
     category = str(meta.get("category", "")).strip().upper()
     procedure = str(meta.get("procedure", "")).strip().upper()
     return category in ("ARRIVAL", "STAR") or "ARRIVAL" in procedure or "STAR" in procedure
+
+
+def _is_approach_item(filename: str, meta: dict) -> bool:
+    category = str(meta.get("category", "")).strip().upper()
+    procedure = str(meta.get("procedure", "")).strip().upper()
+    name = filename.upper()
+    return (
+        category in ("APPROACH", "IAP")
+        or "APPROACH" in procedure
+        or "INSTRUMENT APPROACH" in procedure
+        or "APPROACH" in name
+        or "TACAN" in procedure
+        or "ILS" in procedure
+        or "RNAV" in procedure
+    )
 
 
 def _is_departure_item(filename: str, meta: dict) -> bool:
@@ -1224,6 +1387,7 @@ def run_second_stage_orientation_turn(
             or _is_radar_minimum_altitudes_item(filename, meta)
             or _is_arrival_item(filename, meta)
             or _is_departure_item(filename, meta)
+            or _is_approach_item(filename, meta)
         ):
             continue
         src_pdf = first_dir / filename

@@ -898,7 +898,7 @@ def _transform_roi_after_cw_rotation(roi, page_w, page_h, rot_cw):
 def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result, out_jpg, dpi=180) -> None:
     """Sonuc PDF'i render eder; ROI (mavi), gosterge (kirmizi) ve ok eksenleri (macenta) cizer."""
     scale = dpi / 72.0
-    rot_cw = result.rotation_cw % 360
+    rot_cw = result.rotation_cw % 360 if result.apply_rotation else 0
     doc = pymupdf.open(target_pdf)
     try:
         page = doc[0]

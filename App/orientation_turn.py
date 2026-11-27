@@ -729,9 +729,92 @@ APPROACH_COORD_RE = re.compile(
     r"\b\d{1,2}[- ]\d{2}(?:[- ]\d{2}(?:\.\d+)?)?\s*[NS]\b.*"
     r"\b\d{2,3}[- ]\d{2}(?:[- ]\d{2}(?:\.\d+)?)?\s*[EW]\b", re.I
 )
-APPROACH_ANCHOR_RE = re.compile(
-    r"\b(?:EMG\s*SAFE\s*ALT|CAUTION|IAF|IF|FAF|MAPt|S/S|HOLDING|HOLD)\b", re.I
+APPROACH_LAT_PART_RE = re.compile(
+    r"\b\d{1,2}\s*[°º˚-]\s*\d{1,2}(?:[.,]\d+)?(?:\s*['′’])?\s*N\b", re.I
 )
+APPROACH_LON_PART_RE = re.compile(
+    r"\b\d{2,3}\s*[°º˚-]\s*\d{1,2}(?:[.,]\d+)?(?:\s*['′’])?\s*[EW]\b", re.I
+)
+APPROACH_ANCHOR_RE = re.compile(
+    r"\b(?:EMG\s*SAFE\s*ALT|EMERG(?:ENCY)?\s*SAFE\s*ALT|CAUTION|IAF|IF|FAF|MAPt|S/S|HOLDING|HOLD|HLDG)\b", re.I
+)
+
+
+def _collect_roi_rectangles(page: pymupdf.Page, roi: pymupdf.Rect) -> list[pymupdf.Rect]:
+    """Collect compact vector information boxes fully associated with the planview ROI."""
+    rm = page.rotation_matrix
+    candidates: list[pymupdf.Rect] = []
+    for drawing in page.get_drawings():
+        for item in drawing.get("items", []):
+            if item[0] != "re":
+                continue
+            rect = pymupdf.Rect(item[1]) * rm
+            rect.normalize()
+            if not roi.contains(pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)):
+                continue
+            if not (18.0 <= rect.width <= 260.0 and 8.0 <= rect.height <= 140.0):
+                continue
+            if rect.width * rect.height > 25000.0:
+                continue
+            if not 0.20 <= rect.width / max(rect.height, 0.01) <= 18.0:
+                continue
+            if not any(
+                abs(rect.x0 - old.x0) < 1.5 and abs(rect.y0 - old.y0) < 1.5
+                and abs(rect.x1 - old.x1) < 1.5 and abs(rect.y1 - old.y1) < 1.5
+                for old in candidates
+            ):
+                candidates.append(rect)
+    return candidates
+
+
+def _collect_roi_edge_ticks(page: pymupdf.Page, roi: pymupdf.Rect) -> list[ReferenceBox]:
+    """Find short grid/tick marks touching any ROI edge, independent of their page direction.
+
+    These marks are retained as georeferencing features only; they never vote on chart rotation.
+    """
+    segments, _ = _collect_segments(page, roi)
+    rm = page.rotation_matrix
+    for drawing in page.get_drawings():
+        for item in drawing.get("items", []):
+            if item[0] != "re":
+                continue
+            rect = pymupdf.Rect(item[1]) * rm
+            rect.normalize()
+            if not roi.intersects(rect):
+                continue
+            if 1.5 <= rect.width <= 20.0 and rect.height <= 2.5:
+                segments.append((rect.x0, (rect.y0 + rect.y1) / 2.0,
+                                 rect.x1, (rect.y0 + rect.y1) / 2.0))
+            elif 1.5 <= rect.height <= 20.0 and rect.width <= 2.5:
+                segments.append(((rect.x0 + rect.x1) / 2.0, rect.y0,
+                                 (rect.x0 + rect.x1) / 2.0, rect.y1))
+
+    edge_tol = max(4.0, min(roi.width, roi.height) * 0.008)
+    found: list[ReferenceBox] = []
+    seen: list[tuple[float, float, float, float]] = []
+    for x0, y0, x1, y1 in segments:
+        length = math.hypot(x1 - x0, y1 - y0)
+        if not 1.5 <= length <= 20.0:
+            continue
+        mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        edge_options = (
+            ("LEFT", abs(mx - roi.x0), abs(x1 - x0) >= abs(y1 - y0) * 1.5),
+            ("RIGHT", abs(mx - roi.x1), abs(x1 - x0) >= abs(y1 - y0) * 1.5),
+            ("TOP", abs(my - roi.y0), abs(y1 - y0) >= abs(x1 - x0) * 1.5),
+            ("BOTTOM", abs(my - roi.y1), abs(y1 - y0) >= abs(x1 - x0) * 1.5),
+        )
+        edge, distance, perpendicular = min(edge_options, key=lambda item: item[1])
+        if distance > edge_tol or not perpendicular:
+            continue
+        if any(math.hypot(mx - ((a + c) / 2.0), my - ((b + d) / 2.0)) < 2.0
+               for a, b, c, d in seen):
+            continue
+        seen.append((x0, y0, x1, y1))
+        found.append(ReferenceBox(
+            min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+            0, 0.0, "edge_tick", edge, (x0, y0, x1, y1),
+        ))
+    return found
 
 
 def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationResult:
@@ -748,41 +831,113 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
         )
     ]
 
-    refs: list[ReferenceBox] = []
-    votes: dict[str, list[int]] = {"EMG_SAFE_ALT": [], "PROCEDURE_BOX": [], "IAF_COORD": [], "TERRAIN": []}
-    used: set[int] = set()
+    refs: list[ReferenceBox] = _collect_roi_edge_ticks(page, roi)
+    votes: dict[str, list[int]] = {
+        "EMG_SAFE_ALT": [], "CAUTION": [], "HOLDING": [],
+        "IAF_COORD": [], "AIRPORT_INFO": [], "TERRAIN": [],
+    }
+    used_lines: set[int] = set()
 
+    def add_box_vote(rect: pymupdf.Rect, members: list[tuple[int, dict]], text: str,
+                     family: str, kind: str, weight: float) -> None:
+        if not members:
+            return
+        rotations: dict[int, int] = {}
+        for _, member in members:
+            rot = _line_rotation(member)
+            if rot is None:
+                continue
+            center_x = (member["rect"].x0 + member["rect"].x1) / 2.0
+            center_y = (member["rect"].y0 + member["rect"].y1) / 2.0
+            if any(_pt_seg_dist(center_x, center_y, *seg) < 20.0 for seg in route_like):
+                continue
+            rotations[rot] = rotations.get(rot, 0) + 1
+        if rotations:
+            rotation, count = max(rotations.items(), key=lambda item: item[1])
+            if count / sum(rotations.values()) >= 0.75:
+                votes[family].append(rotation)
+        refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, 0, weight, kind, text))
+        used_lines.update(index for index, _ in members)
+
+    # Prefer complete vector boxes: their border is more useful to the user than
+    # a tight rectangle around one extracted text line.
+    for box in _collect_roi_rectangles(page, roi):
+        members = []
+        for idx, line in enumerate(lines):
+            r = line["rect"]
+            cx, cy = (r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0
+            if box.x0 - 2.0 <= cx <= box.x1 + 2.0 and box.y0 - 2.0 <= cy <= box.y1 + 2.0:
+                members.append((idx, line))
+        if not members:
+            continue
+        text = " ".join(line["text"] for _, line in members)
+        compact = re.sub(r"\s+", " ", text).upper()
+        lat_found = bool(APPROACH_LAT_PART_RE.search(compact))
+        lon_found = bool(APPROACH_LON_PART_RE.search(compact))
+        if re.search(r"EMG(?:ERGENCY)?\s*SAFE\s*ALT", compact, re.I):
+            add_box_vote(box, members, text, "EMG_SAFE_ALT", "approach_emg", 9.0)
+        if re.search(r"\bCAUTION\b", compact, re.I):
+            add_box_vote(box, members, text, "CAUTION", "approach_box_text", 7.0)
+        if re.search(r"\b(?:HOLDING|HOLD|HLDG|S/S)\b", compact, re.I):
+            add_box_vote(box, members, text, "HOLDING", "approach_holding", 7.0)
+        if re.search(r"\b(?:IAF|IF|FAF|MAPt)\b", compact, re.I) or APPROACH_COORD_RE.search(compact):
+            add_box_vote(box, members, text, "IAF_COORD", "approach_iaf", 8.0)
+        elif lat_found and lon_found:
+            add_box_vote(box, members, text, "AIRPORT_INFO", "approach_airport_info", 8.0)
+
+    # Text-only fallback covers boxes whose borders are rasterized or absent.
     for idx, line in enumerate(lines):
+        if idx in used_lines:
+            continue
         text = line["text"].strip()
         compact = re.sub(r"\s+", " ", text).upper()
         rect = line["rect"]
-        cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
-        if any(_pt_seg_dist(cx, cy, *seg) < 20.0 for seg in route_like):
-            continue
-        rot = _line_rotation(line)
-        if rot is None:
-            continue
-
-        if re.search(r"EMG\s*SAFE\s*ALT", compact, re.I):
-            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 8.0,
-                                     "approach_emg", text))
-            votes["EMG_SAFE_ALT"].append(rot)
-            used.add(idx)
-        elif re.search(r"\b(?:CAUTION|S/S|HOLDING|HOLD)\b", compact, re.I):
-            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 5.0,
-                                     "approach_box_text", text))
-            votes["PROCEDURE_BOX"].append(rot)
-            used.add(idx)
+        if re.search(r"EMG(?:ERGENCY)?\s*SAFE\s*ALT", compact, re.I):
+            kind, family, weight = "approach_emg", "EMG_SAFE_ALT", 9.0
+        elif re.search(r"\bCAUTION\b", compact, re.I):
+            kind, family, weight = "approach_box_text", "CAUTION", 7.0
+        elif re.search(r"\b(?:HOLDING|HOLD|HLDG|S/S)\b", compact, re.I):
+            kind, family, weight = "approach_holding", "HOLDING", 7.0
         elif re.search(r"\b(?:IAF|IF|FAF|MAPt)\b", compact, re.I) or APPROACH_COORD_RE.search(compact):
-            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 7.0,
-                                     "approach_iaf", text))
-            votes["IAF_COORD"].append(rot)
-            used.add(idx)
+            kind, family, weight = "approach_iaf", "IAF_COORD", 8.0
+        else:
+            continue
+        cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
+        rot = _line_rotation(line)
+        if rot is not None and not any(_pt_seg_dist(cx, cy, *seg) < 20.0 for seg in route_like):
+            votes[family].append(rot)
+        refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, 0, weight, kind, text))
+        used_lines.add(idx)
 
-    # Terrain/obstacle heights are only supporting evidence. Exclude procedure
-    # altitude labels and anything close to route vectors.
+    # Coordinate pairs may be extracted as separate text lines in an airport
+    # information box. Pair them spatially without depending on line order.
+    lat_lines = [(i, line) for i, line in enumerate(lines)
+                 if i not in used_lines and APPROACH_LAT_PART_RE.search(line["text"])]
+    lon_lines = [(i, line) for i, line in enumerate(lines)
+                 if i not in used_lines and APPROACH_LON_PART_RE.search(line["text"])]
+    for lat_idx, lat_line in lat_lines:
+        lx = (lat_line["rect"].x0 + lat_line["rect"].x1) / 2.0
+        ly = (lat_line["rect"].y0 + lat_line["rect"].y1) / 2.0
+        matches = []
+        for lon_idx, lon_line in lon_lines:
+            ox = (lon_line["rect"].x0 + lon_line["rect"].x1) / 2.0
+            oy = (lon_line["rect"].y0 + lon_line["rect"].y1) / 2.0
+            if math.hypot(ox - lx, oy - ly) <= 55.0:
+                matches.append((lon_idx, lon_line))
+        if not matches:
+            continue
+        lon_idx, lon_line = min(matches, key=lambda item: math.hypot(
+            (item[1]["rect"].x0 + item[1]["rect"].x1) / 2.0 - lx,
+            (item[1]["rect"].y0 + item[1]["rect"].y1) / 2.0 - ly))
+        box = pymupdf.Rect(lat_line["rect"]) | pymupdf.Rect(lon_line["rect"])
+        members = [(lat_idx, lat_line), (lon_idx, lon_line)]
+        add_box_vote(box, members, f"{lat_line['text']} | {lon_line['text']}",
+                     "AIRPORT_INFO", "approach_airport_info", 8.0)
+
+    # Terrain/obstacle heights are supporting evidence only; route altitudes are
+    # deliberately excluded unless a nearby terrain/obstacle cue is present.
     for idx, line in enumerate(lines):
-        if idx in used:
+        if idx in used_lines:
             continue
         text = line["text"].strip()
         if not (ALTITUDE_FT_RE.match(text) or ALTITUDE_VALUE_RE.match(text)):
@@ -791,11 +946,6 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
         cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
         if any(_pt_seg_dist(cx, cy, *seg) < 24.0 for seg in route_like):
             continue
-        rot = _line_rotation(line)
-        if rot is None:
-            continue
-        # Require a nearby terrain/obstacle cue; bare procedure altitudes are
-        # deliberately not treated as terrain.
         nearby = [
             other for other in lines if other is not line
             and math.hypot(
@@ -805,17 +955,20 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
             and re.search(r"\b(?:MT|MOUNTAIN|PEAK|OBST|ELEV|ALT)\b", other["text"], re.I)
         ]
         if nearby:
-            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, rot, 3.0,
+            rot = _line_rotation(line)
+            if rot is not None:
+                votes["TERRAIN"].append(rot)
+            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1, 0, 3.0,
                                      "approach_terrain", text))
-            votes["TERRAIN"].append(rot)
 
     active = {name: values for name, values in votes.items() if values}
     if not active:
         return OrientationResult(0, "none", refs, var_check="APPROACH_REFERENCES_NOT_FOUND",
-                                 basis="emg+procedure_boxes+iaf+terrain", text_lines=len(lines))
+                                 basis="emg+caution+holding+iaf+airport_info+terrain",
+                                 text_lines=len(lines), apply_rotation=False)
 
-    # Each reference family casts one vote; repeated labels in one family do
-    # not outweigh a conflicting independent family.
+    # One vote per independent feature family prevents a busy box from
+    # overpowering a contradictory family. Incomplete evidence remains REVIEW.
     family_rotations = {name: max(set(values), key=values.count) for name, values in active.items()}
     rotations = set(family_rotations.values())
     detail = ",".join(f"{name}={rot}" for name, rot in family_rotations.items())
@@ -1241,13 +1394,20 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 cv2.rectangle(bgr, (bx0, by0), (bx1, by1), (255, 0, 180), 2)
                 continue
-            if ref.kind in ("approach_emg", "approach_box_text", "approach_iaf", "approach_terrain"):
+            if ref.kind == "edge_tick" and ref.line:
+                p, q = T(ref.line[0], ref.line[1]), T(ref.line[2], ref.line[3])
+                cv2.line(bgr, p, q, (0, 165, 255), 4, cv2.LINE_AA)
+                continue
+            if ref.kind in ("approach_emg", "approach_box_text", "approach_iaf", "approach_terrain",
+                            "approach_airport_info", "approach_holding"):
                 bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 color = {
                     "approach_emg": (0, 0, 255),
                     "approach_box_text": (255, 0, 220),
                     "approach_iaf": (0, 210, 0),
                     "approach_terrain": (0, 165, 255),
+                    "approach_airport_info": (255, 180, 0),
+                    "approach_holding": (180, 0, 255),
                 }[ref.kind]
                 cv2.rectangle(bgr, (bx0 - 3, by0 - 3), (bx1 + 3, by1 + 3), color, 2)
                 continue

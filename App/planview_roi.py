@@ -414,7 +414,9 @@ def _save_diagnostic_image(
     """Render an open page (or legacy PDF path) with its ROI rectangle."""
     doc = None
     if isinstance(page_or_pdf, pymupdf.Page):
-        page = page_or_pdf
+        # Draw on an in-memory copy so diagnostics never contaminate the PDF being saved.
+        doc = pymupdf.open(stream=page_or_pdf.parent.tobytes(), filetype="pdf")
+        page = doc[page_or_pdf.number]
     else:
         doc = pymupdf.open(page_or_pdf)
         page = doc[0]

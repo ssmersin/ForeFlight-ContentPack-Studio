@@ -1061,8 +1061,9 @@ def run_second_stage_orientation_turn(
             page = doc[0]
             page_w, page_h = float(page.rect.width), float(page.rect.height)
             result = detect_page_orientation(page, roi, str(meta.get("category", "")), str(meta.get("procedure", "")))
-            if result.rotation_cw != 0:
-                page.set_rotation((int(page.rotation) + result.rotation_cw) % 360)
+            effective_rotation = result.rotation_cw if result.apply_rotation else 0
+            if effective_rotation != 0:
+                page.set_rotation((int(page.rotation) + effective_rotation) % 360)
                 doc.save(str(dst_pdf))
                 rotated = True
             else:
@@ -1072,7 +1073,7 @@ def run_second_stage_orientation_turn(
 
         if rotated:
             src_pdf.unlink()
-            rotated_items.append((filename, result.rotation_cw, f"{result.method}/{result.basis}/{result.var_check}"))
+            rotated_items.append((filename, effective_rotation, f"{result.method}/{result.basis}/{result.var_check}"))
         else:
             if dst_pdf.exists():
                 dst_pdf.unlink()
@@ -1088,7 +1089,7 @@ def run_second_stage_orientation_turn(
         remaining.pop(filename, None)
 
         new_roi, new_w, new_h = _transform_roi_after_cw_rotation(
-            {"x0": roi.x0, "y0": roi.y0, "x1": roi.x1, "y1": roi.y1}, page_w, page_h, result.rotation_cw)
+            {"x0": roi.x0, "y0": roi.y0, "x1": roi.x1, "y1": roi.y1}, page_w, page_h, effective_rotation)
         nm = dict(meta)
         nm.update(page_width=new_w, page_height=new_h, roi=new_roi)
         nm["orientation"] = {

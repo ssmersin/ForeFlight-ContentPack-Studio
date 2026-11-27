@@ -487,6 +487,119 @@ def _detect_color_altitude_scale(
     return best
 
 
+def _reference_boxes_for_scale(scale: dict) -> list[ReferenceBox]:
+    refs: list[ReferenceBox] = []
+    r = scale["rect"]
+    refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, scale["rot"], 8.0,
+                             "altitude_scale", "COLOR / ALTITUDE SCALE"))
+    for line in scale["labels"]:
+        r = line["rect"]
+        refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, scale["rot"], 6.0,
+                                 "altitude_scale_label", line["text"]))
+    for swatch in scale.get("swatches", []):
+        if _overlap(swatch, scale["rect"]):
+            refs.append(ReferenceBox(swatch.x0, swatch.y0, swatch.x1, swatch.y1,
+                                     scale["rot"], 2.0, "altitude_swatch", "COLOR SWATCH"))
+    return refs
+
+
+def _detect_non_route_text_vote(
+    page: pymupdf.Page, lines: list[dict], roi: pymupdf.Rect,
+    excluded_rects: Optional[list[pymupdf.Rect]] = None,
+) -> Optional[dict]:
+    """Use distributed, map-fixed text only; reject labels close to long route-like vectors."""
+    segments, _ = _collect_segments(page, roi)
+    route_like = []
+    for x0, y0, x1, y1 in segments:
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 38.0:
+            continue
+        # Ignore the planview frame itself.
+        if ((abs(x0 - roi.x0) < 4 and abs(x1 - roi.x0) < 4)
+                or (abs(x0 - roi.x1) < 4 and abs(x1 - roi.x1) < 4)
+                or (abs(y0 - roi.y0) < 4 and abs(y1 - roi.y0) < 4)
+                or (abs(y0 - roi.y1) < 4 and abs(y1 - roi.y1) < 4)):
+            continue
+        route_like.append((x0, y0, x1, y1))
+
+    excluded_rects = excluded_rects or []
+    candidates = []
+    for line in lines:
+        text = line["text"].strip()
+        compact = re.sub(r"\s+", "", text)
+        if len(compact) < 3 or ALTITUDE_FT_RE.match(text) or ALTITUDE_VALUE_RE.match(text):
+            continue
+        if re.fullmatch(r"[\d./\-+]+", compact):
+            continue
+        rect = line["rect"]
+        center = ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+        if any(_overlap(rect, ex) for ex in excluded_rects):
+            continue
+        # Conservative clearance: labels near long straight route legs are never votes.
+        if any(_pt_seg_dist(center[0], center[1], *seg) < 20.0 for seg in route_like):
+            continue
+        rot = _line_rotation(line)
+        if rot is None:
+            continue
+        candidates.append((rot, line))
+
+    if len(candidates) < 5:
+        return None
+    counts: dict[int, int] = {}
+    for rot, _ in candidates:
+        counts[rot] = counts.get(rot, 0) + 1
+    rot, count = max(counts.items(), key=lambda item: item[1])
+    if count < 5 or count / len(candidates) < 0.70:
+        return {"ignored": True, "n": len(candidates),
+                "boxes": [line["rect"] for _, line in candidates]}
+    selected = [line for candidate_rot, line in candidates if candidate_rot == rot]
+    # Require the text evidence to be spatially distributed, not one route annotation cluster.
+    centers = [((ln["rect"].x0 + ln["rect"].x1) / 2,
+                (ln["rect"].y0 + ln["rect"].y1) / 2) for ln in selected]
+    spread_x = max(p[0] for p in centers) - min(p[0] for p in centers)
+    spread_y = max(p[1] for p in centers) - min(p[1] for p in centers)
+    if spread_x < roi.width * 0.12 and spread_y < roi.height * 0.12:
+        return None
+    return {"rot": rot, "n": len(selected), "boxes": [ln["rect"] for ln in selected],
+            "labels": selected, "ignored": False}
+
+
+def _departure_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationResult:
+    lines = _collect_text_lines(page, roi)
+    scale = _detect_color_altitude_scale(page, lines, roi)
+    scale_rects = [scale["rect"]] if scale else []
+    text_vote = _detect_non_route_text_vote(page, lines, roi, excluded_rects=scale_rects)
+    refs: list[ReferenceBox] = []
+    votes: list[tuple[str, int]] = []
+
+    if scale:
+        refs.extend(_reference_boxes_for_scale(scale))
+        votes.append(("SCALE", scale["rot"]))
+    if text_vote:
+        for rect in text_vote["boxes"]:
+            refs.append(ReferenceBox(rect.x0, rect.y0, rect.x1, rect.y1,
+                                     text_vote.get("rot", 0), 4.0, "departure_text", "NON-ROUTE TEXT"))
+        if not text_vote["ignored"]:
+            votes.append(("MAP_TEXT", text_vote["rot"]))
+
+    if not votes:
+        state = "DEPARTURE_TEXT_CONFLICT" if text_vote and text_vote["ignored"] else "DEPARTURE_REFERENCES_NOT_FOUND"
+        return OrientationResult(0, "none", refs, var_check=state,
+                                 basis="color_altitude+non_route_text", text_lines=len(lines),
+                                 apply_rotation=False)
+    rotations = {rot for _, rot in votes}
+    if len(rotations) != 1:
+        detail = ",".join(f"{name}={rot}" for name, rot in votes)
+        return OrientationResult(0, "none", refs, var_check=f"DEPARTURE_REFERENCE_CONFLICT({detail})",
+                                 basis="color_altitude+non_route_text", text_lines=len(lines),
+                                 apply_rotation=False)
+    rotation = rotations.pop()
+    basis = "+".join(name.lower() for name, _ in votes)
+    check = f"DEPARTURE_AGREE({basis})" if len(votes) > 1 else f"DEPARTURE_SINGLE({basis})"
+    return OrientationResult(rotation, "departure_references", refs, var_check=check,
+                             basis=basis, text_lines=len(lines), apply_rotation=False)
+
+
 def _detect_msa_reference(
     page: pymupdf.Page, lines: list[dict], roi: pymupdf.Rect
 ) -> Optional[dict]:
@@ -553,17 +666,8 @@ def _detect_arrival_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> Orient
         votes.append(("MSA", msa["rot"], msa["score"]))
 
     if scale:
-        r = scale["rect"]
-        refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, scale["rot"], 8.0, "altitude_scale", "COLOR / ALTITUDE SCALE"))
-        for line in scale["labels"]:
-            r = line["rect"]
-            refs.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, scale["rot"], 6.0, "altitude_scale_label", line["text"]))
+        refs.extend(_reference_boxes_for_scale(scale))
         votes.append(("SCALE", scale["rot"], scale["score"]))
-        # Include individual color swatches for visual confirmation.
-        for swatch in scale["swatches"]:
-            if _overlap(swatch, r):
-                refs.append(ReferenceBox(swatch.x0, swatch.y0, swatch.x1, swatch.y1,
-                                         scale["rot"], 2.0, "altitude_swatch", "COLOR SWATCH"))
 
     if not votes:
         return OrientationResult(0, "none", refs, var_check="ARRIVAL_REFERENCES_NOT_FOUND",
@@ -842,30 +946,53 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
     if is_rma:
         lines = _collect_text_lines(page, roi_rect)
         vote = _find_rma_latitude_vote(page, lines, roi_rect)
+        scale = _detect_color_altitude_scale(page, lines, roi_rect)
+        scale_refs = _reference_boxes_for_scale(scale) if scale else []
+        scale_rot = scale["rot"] if scale else None
         if result.method == "none":
-            if vote is None:
-                return OrientationResult(0, "none", [], var_check="RMA_LAT_NOT_FOUND", text_lines=len(lines))
-            if vote["ignored"]:
-                return OrientationResult(0, "none", vote["boxes"], var_check="RMA_LAT_CONFLICT", text_lines=len(lines))
-            return OrientationResult(
-                vote["rot"], "lat_labels", vote["boxes"],
-                basis=f"rma_lat_ticks(n={vote['n']})",
-                var_check=f"RMA_LAT_OK(n={vote['n']})", text_lines=len(lines),
-            )
+            primary = vote if vote and not vote["ignored"] else None
+            if primary is None and scale_rot is None:
+                refs = vote["boxes"] if vote else []
+                return OrientationResult(0, "none", refs + scale_refs,
+                    var_check="RMA_LAT_AND_SCALE_NOT_FOUND" if vote is None else "RMA_REFERENCES_CONFLICT_OR_SCALE_NOT_FOUND",
+                    basis="rma_lat+color_altitude", text_lines=len(lines))
+            if primary is not None and scale_rot is not None and primary["rot"] != scale_rot:
+                return OrientationResult(0, "none", primary["boxes"] + scale_refs,
+                    var_check=f"RMA_REFERENCE_CONFLICT(LAT={primary['rot']},SCALE={scale_rot})",
+                    basis="rma_lat+color_altitude", text_lines=len(lines))
+            chosen = primary["rot"] if primary is not None else scale_rot
+            refs = (primary["boxes"] if primary is not None else (vote["boxes"] if vote else [])) + scale_refs
+            basis = "rma_lat+color_altitude" if primary is not None and scale_rot is not None else ("rma_lat_ticks" if primary is not None else "color_altitude")
+            return OrientationResult(chosen, "lat_labels" if primary is not None else "arrival_references",
+                refs, basis=basis, var_check="RMA_REFERENCES_AGREE" if primary is not None and scale_rot is not None else "RMA_SINGLE_REFERENCE",
+                text_lines=len(lines))
+        refs = list(result.references) + (vote["boxes"] if vote else []) + scale_refs
+        check = result.var_check
         if vote is not None:
-            check = result.var_check
             if vote["ignored"]:
-                check = f"{check}; RMA_LAT_CONFLICT"
+                check += "; RMA_LAT_CONFLICT"
             elif vote["rot"] == result.rotation_cw:
-                check = f"{check}; RMA_LAT_AGREE(n={vote['n']})"
+                check += f"; RMA_LAT_AGREE(n={vote['n']})"
             else:
-                check = f"{check}; RMA_LAT_CONFLICT(lat={vote['rot']}) -> VAR wins"
-            result = OrientationResult(
-                result.rotation_cw, result.method, result.references + vote["boxes"],
-                var_text=result.var_text, year=result.year,
-                north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
-                var_check=check, basis=result.basis, text_lines=max(result.text_lines, len(lines)),
-            )
+                check += f"; RMA_LAT_CONFLICT(lat={vote['rot']}) -> VAR wins"
+        if scale_rot is not None:
+            if scale_rot == result.rotation_cw:
+                check += "; RMA_SCALE_AGREE"
+            else:
+                check += f"; RMA_SCALE_CONFLICT(scale={scale_rot}) -> VAR wins"
+        result = OrientationResult(
+            result.rotation_cw, result.method, refs,
+            var_text=result.var_text, year=result.year,
+            north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
+            var_check=check, basis=result.basis, text_lines=max(result.text_lines, len(lines)),
+        )
+    is_departure = (
+        str(category or "").strip().upper() in ("DEPARTURE", "SID")
+        or "DEPARTURE" in (procedure or "").upper()
+        or "SID" in (procedure or "").upper()
+    )
+    if is_departure:
+        return _departure_orientation(page, roi_rect)
     return result
 
 
@@ -920,7 +1047,7 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
         x0, y0, x1, y1 = TR(orig_roi.x0, orig_roi.y0, orig_roi.x1, orig_roi.y1)
         cv2.rectangle(bgr, (x0, y0), (x1, y1), (255, 110, 0), 3)
 
-        found = result.method in ("variation_indicator", "lat_labels", "arrival_references")
+        found = result.method in ("variation_indicator", "lat_labels", "arrival_references", "departure_references")
         for ref in result.references:
             if ref.kind == "lat_label":
                 lx0, ly0, lx1, ly1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
@@ -959,6 +1086,10 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 cv2.rectangle(bgr, (bx0, by0), (bx1, by1), (255, 0, 180), 2)
                 continue
+            if ref.kind == "departure_text":
+                bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
+                cv2.rectangle(bgr, (bx0 - 3, by0 - 3), (bx1 + 3, by1 + 3), (0, 220, 0), 2)
+                continue
             bx0, by0, bx1, by1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
             bx0, by0 = max(0, bx0 - 6), max(0, by0 - 6)
             bx1, by1 = min(W - 1, bx1 + 6), min(H - 1, by1 + 6)
@@ -973,10 +1104,13 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 ind = "VAR_IND=FOUND"
             elif result.method == "arrival_references":
                 ind = "ARRIVAL_REFERENCES"
+            elif result.method == "departure_references":
+                ind = "DEPARTURE_REFERENCES"
             else:
                 ind = "VAR_IND=NOT USED, LAT"
-            if result.method == "arrival_references" or not result.apply_rotation:
-                status = f"ARRIVAL PREVIEW ONLY | PROPOSED_CW={result.rotation_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
+            if result.method in ("arrival_references", "departure_references") or not result.apply_rotation:
+                stage_name = "DEPARTURE" if result.method == "departure_references" else "ARRIVAL"
+                status = f"{stage_name} PREVIEW ONLY | PROPOSED_CW={result.rotation_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
             else:
                 status = f"ROT_CW={rot_cw} | {ind}({result.basis}) | CHECK={result.var_check}{ang}"
             color = (0, 0, 220) if rot_cw else (0, 140, 0)
@@ -1020,6 +1154,12 @@ def _is_arrival_item(filename: str, meta: dict) -> bool:
     return category in ("ARRIVAL", "STAR") or "ARRIVAL" in procedure or "STAR" in procedure
 
 
+def _is_departure_item(filename: str, meta: dict) -> bool:
+    category = str(meta.get("category", "")).strip().upper()
+    procedure = str(meta.get("procedure", "")).strip().upper()
+    return category in ("DEPARTURE", "SID") or "DEPARTURE" in procedure or "SID" in procedure
+
+
 def run_second_stage_orientation_turn(
     first_dir: Path,
     second_dir: Path,
@@ -1047,6 +1187,7 @@ def run_second_stage_orientation_turn(
             _is_aerodrome_diagram_item(filename, meta)
             or _is_radar_minimum_altitudes_item(filename, meta)
             or _is_arrival_item(filename, meta)
+            or _is_departure_item(filename, meta)
         ):
             continue
         src_pdf = first_dir / filename

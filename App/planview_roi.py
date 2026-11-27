@@ -406,26 +406,27 @@ def detect_planview_roi(page: pymupdf.Page, category: str, procedure: str) -> Op
 
 
 def _save_diagnostic_image(
-    pdf_path: Path,
+    page_or_pdf,
     roi: PlanviewRoi,
     out_jpg: Path,
     dpi: int = 150,
 ) -> None:
-    """Render the page with a yellow ROI rectangle over the detected region."""
-    doc = pymupdf.open(pdf_path)
-    try:
+    """Render an open page (or legacy PDF path) with its ROI rectangle."""
+    doc = None
+    if isinstance(page_or_pdf, pymupdf.Page):
+        page = page_or_pdf
+    else:
+        doc = pymupdf.open(page_or_pdf)
         page = doc[0]
-        page.draw_rect(
-            roi.to_rect(),
-            color=(1.0, 0.92, 0.0),
-            width=3.0,
-        )
+    try:
+        page.draw_rect(roi.to_rect(), color=(1.0, 0.92, 0.0), width=3.0)
         zoom = dpi / 72.0
         pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
         out_jpg.parent.mkdir(parents=True, exist_ok=True)
         pix.save(str(out_jpg), jpg_quality=90)
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
 
 
 def _save_roi_manifest(manifest_path: Path, records: dict[str, dict]) -> None:

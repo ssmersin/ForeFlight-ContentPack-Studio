@@ -874,7 +874,7 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
         compact = re.sub(r"\s+", " ", text).upper()
         lat_found = bool(APPROACH_LAT_PART_RE.search(compact))
         lon_found = bool(APPROACH_LON_PART_RE.search(compact))
-        if re.search(r"EMG(?:ERGENCY)?\s*SAFE\s*ALT", compact, re.I):
+        if re.search(r"\b(?:EMG|EMERG(?:ENCY)?)\s*SAFE\s*ALT\b", compact, re.I):
             add_box_vote(box, members, text, "EMG_SAFE_ALT", "approach_emg", 9.0)
         if re.search(r"\bCAUTION\b", compact, re.I):
             add_box_vote(box, members, text, "CAUTION", "approach_box_text", 7.0)
@@ -892,7 +892,7 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
         text = line["text"].strip()
         compact = re.sub(r"\s+", " ", text).upper()
         rect = line["rect"]
-        if re.search(r"EMG(?:ERGENCY)?\s*SAFE\s*ALT", compact, re.I):
+        if re.search(r"\b(?:EMG|EMERG(?:ENCY)?)\s*SAFE\s*ALT\b", compact, re.I):
             kind, family, weight = "approach_emg", "EMG_SAFE_ALT", 9.0
         elif re.search(r"\bCAUTION\b", compact, re.I):
             kind, family, weight = "approach_box_text", "CAUTION", 7.0

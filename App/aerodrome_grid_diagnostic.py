@@ -52,25 +52,20 @@ def save_grid_diagnostic(source_pdf: Path, output_image: Path):
     try:
         page = doc[0]
         candidates = detect_page_grid_candidates(page)
+        for axis, color in (("LAT", (1, 0, 0)), ("LONG", (0, 0.25, 1))):
+            for index, (fixed, start, end) in enumerate(candidates[axis], 1):
+                if axis == "LAT":
+                    p1, p2 = (start, fixed), (end, fixed)
+                    label = (max(8, start+3), max(12, fixed-3))
+                else:
+                    p1, p2 = (fixed, start), (fixed, end)
+                    label = (fixed+3, max(12, start+8))
+                page.draw_line(p1, p2, color=color, width=1.5, overlay=True)
+                page.insert_text(label, f"{axis} candidate {index}",
+                                 fontsize=6, color=color, overlay=True)
+        output_image.parent.mkdir(parents=True, exist_ok=True)
         pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
-        image = pymupdf.open("png", pix.tobytes("png"))
-        try:
-            overlay = image[0]
-            for axis, color in (("LAT", (1, 0, 0)), ("LONG", (0, 0.25, 1))):
-                for index, (fixed, start, end) in enumerate(candidates[axis], 1):
-                    if axis == "LAT":
-                        p1, p2 = (start, fixed), (end, fixed)
-                        label = (max(8, start+3), max(12, fixed-3))
-                    else:
-                        p1, p2 = (fixed, start), (fixed, end)
-                        label = (fixed+3, max(12, start+8))
-                    overlay.draw_line(p1, p2, color=color, width=1.5, overlay=True)
-                    overlay.insert_text(label, f"{axis} candidate {index}",
-                                        fontsize=6, color=color, overlay=True)
-            output_image.parent.mkdir(parents=True, exist_ok=True)
-            image.save(output_image)
-        finally:
-            image.close()
+        pix.save(output_image)
         return {axis: len(lines) for axis, lines in candidates.items()}
     finally:
         doc.close()

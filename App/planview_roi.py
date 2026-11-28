@@ -421,7 +421,10 @@ def _save_diagnostic_image(
         doc = pymupdf.open(page_or_pdf)
         page = doc[0]
     try:
-        page.draw_rect(roi.to_rect(), color=(1.0, 0.92, 0.0), width=3.0)
+        # ROI bounds are expressed in visible-page coordinates. Drawing APIs
+        # require unrotated PDF coordinates, so map the rectangle back first.
+        raw_roi = roi.to_rect() * page.derotation_matrix
+        page.draw_rect(raw_roi, color=(1.0, 0.92, 0.0), width=3.0)
         zoom = dpi / 72.0
         pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
         out_jpg.parent.mkdir(parents=True, exist_ok=True)

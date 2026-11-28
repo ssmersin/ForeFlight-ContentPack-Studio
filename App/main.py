@@ -9,6 +9,7 @@ from cover_metadata import read_cover_metadata
 from flip_parser import inspect_pdf
 from pdf_splitter import split_chart_pages
 from roi_orientation_pipeline import run_combined_roi_orientation_stage
+from aerodrome_grid_diagnostic import run_aerodrome_grid_diagnostics
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +87,17 @@ def main() -> int:
         print(f"00-INITIAL REMAINED (no closed frame): {name}")
     if args.diagnostic:
         print(f"01-First-Diag : {len(diag_exports)}")
+    grid_diagnostics = []
+    if args.diagnostic:
+        grid_diagnostics = run_aerodrome_grid_diagnostics(
+            input_dir=first_dir,
+            output_dir=hedef_root / "03-Grid-Diagnostic",
+            charts=charts,
+        )
+        print(f"03-Grid-Diagnostic: {len(grid_diagnostics)}")
+        for name, lat_count, long_count in grid_diagnostics:
+            print(f"  GRID {name}: LAT={lat_count}, LONG={long_count}")
+
     print(f"Orientation rotated: {len(rotated_items)}")
     for fname, rot_deg, method in rotated_items:
         print(f"  ROTATED {rot_deg}° CW [{method}]: {fname}")

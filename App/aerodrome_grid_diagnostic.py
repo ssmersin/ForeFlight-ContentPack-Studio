@@ -51,7 +51,7 @@ def _merge_segments(segments, tolerance=2.2, max_gap=36.0):
             None,
         )
         if match is None:
-            clusters.append([fixed, start, end])
+            clusters.append([fixed, start, end, 1])
         else:
             count = match[3]
             match[0] = (match[0] * count + fixed) / (count + 1)

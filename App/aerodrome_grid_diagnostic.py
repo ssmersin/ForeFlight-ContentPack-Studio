@@ -42,8 +42,8 @@ def detect_page_grid_candidates(page: pymupdf.Page):
     width, height = float(page.rect.width), float(page.rect.height)
     lat = _merge_segments(_segments(page, True))
     long = _merge_segments(_segments(page, False))
-    lat = [v for v in lat if v[2]-v[1] >= width*0.50 and 4 < v[0] < height-4]
-    long = [v for v in long if v[2]-v[1] >= height*0.50 and 4 < v[0] < width-4]
+    lat = [v for v in lat if v[2]-v[1] >= width*0.50 and height*0.07 < v[0] < height*0.93]
+    long = [v for v in long if v[2]-v[1] >= height*0.50 and width*0.07 < v[0] < width*0.93]
     return {"LAT": sorted(lat), "LONG": sorted(long)}
 
 

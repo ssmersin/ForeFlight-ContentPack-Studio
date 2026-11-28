@@ -219,14 +219,14 @@ def _calculated_complement(candidates, width, height, roi, labels):
     step_count = 1
     while anchor[0] - step_count * spacing > fixed_min:
         position = anchor[0] - step_count * spacing
-        value = anchor_value + step_count * angular_step
+        value = (anchor_value + step_count * angular_step) if missing_axis == "LAT" else (anchor_value - step_count * angular_step)
         calculated.append((position, 0.0, width if missing_axis == "LAT" else height,
                            _format_coordinate(value, missing_axis, hemisphere), value, hemisphere))
         step_count += 1
     step_count = 1
     while anchor[0] + step_count * spacing < fixed_max:
         position = anchor[0] + step_count * spacing
-        value = anchor_value - step_count * angular_step
+        value = (anchor_value - step_count * angular_step) if missing_axis == "LAT" else (anchor_value + step_count * angular_step)
         calculated.append((position, 0.0, width if missing_axis == "LAT" else height,
                            _format_coordinate(value, missing_axis, hemisphere), value, hemisphere))
         step_count += 1

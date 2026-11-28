@@ -93,17 +93,18 @@ class RmaEdgeTickValidationTests(unittest.TestCase):
         self.assertEqual(sum(box.kind == "lat_tick" for box in vote["boxes"]), 1)
         self.assertEqual(sum(box.kind == "lat_opposite_tick" for box in vote["boxes"]), 1)
 
-    def test_single_unpaired_tick_requires_a_coordinate_label(self):
+    def test_single_unpaired_tick_is_never_accepted_even_with_label(self):
         self.page.draw_line((46, 150), (54, 150), color=(0, 0, 0), width=1)
+        self.add_left_label(150)
         rejected = self.vote()
         self.assertIsNotNone(rejected)
         self.assertTrue(rejected["ignored"])
 
-        self.add_left_label(150)
-        vote = self.vote()
-        self.assertIsNotNone(vote)
-        self.assertFalse(vote["ignored"])
-        self.assertEqual(vote["n"], 1)
+    def test_unlabelled_opposite_pair_is_rejected(self):
+        self.add_pair(150)
+        rejected = self.vote()
+        self.assertIsNotNone(rejected)
+        self.assertTrue(rejected["ignored"])
 
     def test_multiple_unpaired_ticks_are_rejected(self):
         self.page.draw_line((46, 100), (54, 100), color=(0, 0, 0), width=1)

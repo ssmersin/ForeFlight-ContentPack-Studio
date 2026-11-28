@@ -16,8 +16,8 @@ from orientation_turn import _collect_text_lines
 # (40°19'00'' N), including the FLIP font-decoded quote variants.
 _COORD_RE = re.compile(
     r"(?<!\d)(\d{1,3})\s*[°º˚]\s*(\d{1,2}(?:[.,]\d+)?)"
-    r"(?:\s*['′’]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:[\"″”]{1,2})?)?"
-    r"\s*([NSEW])\b",
+    r"(?:\s*['′’]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:[\"″”]{1,2}|['′’]{1,2})?)?"
+    r"\s*['′’]?\s*([NSEW])\b",
     re.IGNORECASE,
 )
 

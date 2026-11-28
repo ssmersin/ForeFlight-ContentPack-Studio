@@ -247,11 +247,11 @@ def detect_page_grid_candidates(page: pymupdf.Page, roi: pymupdf.Rect):
     labels = _coordinate_labels(page, expanded)
     horizontal = _merge_segments(
         _visible_segments(page, True, roi),
-        max_gap=max(12.0, roi.width * 0.035),
+        max_gap=max(18.0, roi.width * 0.07),
     )
     vertical = _merge_segments(
         _visible_segments(page, False, roi),
-        max_gap=max(12.0, roi.height * 0.035),
+        max_gap=max(18.0, roi.height * 0.07),
     )
     lat = _match_grid_lines(horizontal, labels, "LAT", roi)
     lon = _match_grid_lines(vertical, labels, "LONG", roi)

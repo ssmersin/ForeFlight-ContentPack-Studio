@@ -80,15 +80,24 @@ def run_combined_roi_orientation_stage(
             orientation = detect_page_orientation(page, roi, category, procedure)
             effective_rotation = int(orientation.rotation_cw) % 360 if orientation.apply_rotation else 0
 
-            # Diagnostics render copies/in-memory pixels and do not alter the source page.
-            if diagnostic and roi_diagnostic_dir is not None:
-                roi_path = roi_diagnostic_dir / f"{Path(filename).stem}.jpg"
-                _save_diagnostic_image(page, roi, roi_path)
-                if roi_path.is_file():
-                    roi_diagnostics.append(roi_path)
-
+            # Apply the page rotation before rendering the ROI diagnostic so
+            # the diagnostic has exactly the same visible orientation as 01-Rotation.
             if effective_rotation:
                 page.set_rotation((int(page.rotation) + effective_rotation) % 360)
+
+            if diagnostic and roi_diagnostic_dir is not None:
+                roi_path = roi_diagnostic_dir / f"{Path(filename).stem}.jpg"
+                rotated_roi, _, _ = _transform_roi_after_cw_rotation(
+                    asdict(roi), original_width, original_height, effective_rotation
+                )
+                from planview_roi import PlanviewRoi
+                _save_diagnostic_image(
+                    page,
+                    PlanviewRoi(**rotated_roi),
+                    roi_path,
+                )
+                if roi_path.is_file():
+                    roi_diagnostics.append(roi_path)
 
             if diagnostic and orientation_diagnostic_dir is not None:
                 turn_path = orientation_diagnostic_dir / f"{Path(filename).stem}.jpg"

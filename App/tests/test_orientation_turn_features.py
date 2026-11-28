@@ -8,7 +8,10 @@ import pymupdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orientation_turn import (\n    _approach_orientation, _collect_roi_edge_ticks,\n    _collect_text_lines, _find_rma_latitude_vote,\n)
+from orientation_turn import (
+    _approach_orientation, _collect_roi_edge_ticks,
+    _collect_text_lines, _find_rma_latitude_vote,
+)
 
 
 class ApproachFeatureDetectionTests(unittest.TestCase):

@@ -130,9 +130,12 @@ def _format_coordinate(value: float, axis: str, hemisphere_hint: str = "") -> st
 def _match_grid_lines(segments, labels, axis, roi):
     """Accept a vector line only when an axis-matching coordinate label anchors it."""
     horizontal = axis == "LAT"
-    dimension = roi.height if horizontal else roi.width
-    min_length = dimension * 0.42
-    max_distance = max(22.0, dimension * 0.035)
+    # Segment length is measured along the grid line; label offset is
+    # measured perpendicular to it. Keep these dimensions separate.
+    along_dimension = roi.width if horizontal else roi.height
+    cross_dimension = roi.height if horizontal else roi.width
+    min_length = along_dimension * 0.42
+    max_distance = max(22.0, cross_dimension * 0.035)
     candidates = [
         segment for segment in segments
         if segment[2] - segment[1] >= min_length

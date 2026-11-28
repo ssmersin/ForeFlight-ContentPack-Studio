@@ -767,56 +767,6 @@ def _collect_roi_rectangles(page: pymupdf.Page, roi: pymupdf.Rect) -> list[pymup
     return candidates
 
 
-def _collect_roi_edge_ticks(page: pymupdf.Page, roi: pymupdf.Rect) -> list[ReferenceBox]:
-    """Find short grid/tick marks touching any ROI edge, independent of their page direction.
-
-    These marks are retained as georeferencing features only; they never vote on chart rotation.
-    """
-    segments, _ = _collect_segments(page, roi)
-    rm = page.rotation_matrix
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if item[0] != "re":
-                continue
-            rect = pymupdf.Rect(item[1]) * rm
-            rect.normalize()
-            if not roi.intersects(rect):
-                continue
-            if 1.5 <= rect.width <= 20.0 and rect.height <= 2.5:
-                segments.append((rect.x0, (rect.y0 + rect.y1) / 2.0,
-                                 rect.x1, (rect.y0 + rect.y1) / 2.0))
-            elif 1.5 <= rect.height <= 20.0 and rect.width <= 2.5:
-                segments.append(((rect.x0 + rect.x1) / 2.0, rect.y0,
-                                 (rect.x0 + rect.x1) / 2.0, rect.y1))
-
-    edge_tol = max(4.0, min(roi.width, roi.height) * 0.008)
-    found: list[ReferenceBox] = []
-    seen: list[tuple[float, float, float, float]] = []
-    for x0, y0, x1, y1 in segments:
-        length = math.hypot(x1 - x0, y1 - y0)
-        if not 1.5 <= length <= 20.0:
-            continue
-        mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        edge_options = (
-            ("LEFT", abs(mx - roi.x0), abs(x1 - x0) >= abs(y1 - y0) * 1.5),
-            ("RIGHT", abs(mx - roi.x1), abs(x1 - x0) >= abs(y1 - y0) * 1.5),
-            ("TOP", abs(my - roi.y0), abs(y1 - y0) >= abs(x1 - x0) * 1.5),
-            ("BOTTOM", abs(my - roi.y1), abs(y1 - y0) >= abs(x1 - x0) * 1.5),
-        )
-        edge, distance, perpendicular = min(edge_options, key=lambda item: item[1])
-        if distance > edge_tol or not perpendicular:
-            continue
-        if any(math.hypot(mx - ((a + c) / 2.0), my - ((b + d) / 2.0)) < 2.0
-               for a, b, c, d in seen):
-            continue
-        seen.append((x0, y0, x1, y1))
-        found.append(ReferenceBox(
-            min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
-            0, 0.0, "edge_tick", edge, (x0, y0, x1, y1),
-        ))
-    return found
-
-
 def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationResult:
     lines = _collect_text_lines(page, roi)
     segments, _ = _collect_segments(page, roi)
@@ -831,7 +781,7 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
         )
     ]
 
-    refs: list[ReferenceBox] = _collect_roi_edge_ticks(page, roi)
+    refs: list[ReferenceBox] = []
     votes: dict[str, list[int]] = {
         "EMG_SAFE_ALT": [], "CAUTION": [], "HOLDING": [],
         "IAF_COORD": [], "AIRPORT_INFO": [], "TERRAIN": [],
@@ -985,189 +935,6 @@ def _approach_orientation(page: pymupdf.Page, roi: pymupdf.Rect) -> OrientationR
                              apply_rotation=False)
 
 
-def _find_rma_latitude_vote(
-    page: pymupdf.Page,
-    lines: list[dict],
-    roi_rect: pymupdf.Rect,
-) -> Optional[dict]:
-    """Accept only labelled, opposite-edge RMA tick pairs.
-
-    A candidate is a genuine tick only when a short straight segment crosses
-    an ROI edge, has a counterpart on the opposite edge at the same pixel
-    coordinate, and exactly one of those two marks has a coordinate label.
-    Unpaired marks and unlabelled pairs never vote.
-    """
-    width, height = roi_rect.width, roi_rect.height
-    if width <= 0 or height <= 0:
-        return None
-
-    segments, _ = _collect_segments(page, roi_rect)
-    rm = page.rotation_matrix
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if item[0] != "re":
-                continue
-            rect = pymupdf.Rect(item[1]) * rm
-            rect.normalize()
-            if not _overlap(rect, roi_rect):
-                continue
-            if 1.5 <= rect.width <= 16.0 and rect.height <= 2.5:
-                segments.append((rect.x0, (rect.y0 + rect.y1) / 2.0,
-                                 rect.x1, (rect.y0 + rect.y1) / 2.0))
-            elif 1.5 <= rect.height <= 16.0 and rect.width <= 2.5:
-                segments.append(((rect.x0 + rect.x1) / 2.0, rect.y0,
-                                 (rect.x0 + rect.x1) / 2.0, rect.y1))
-
-    edge_tol = max(2.0, min(4.0, min(width, height) * 0.004))
-    pair_tol = 3.0
-    raw_ticks: list[dict] = []
-    seen: set[tuple[str, int]] = set()
-
-    # Only short, almost perpendicular strokes that physically cross an ROI
-    # boundary are candidates. Merely being close to the boundary is not enough.
-    for seg in segments:
-        x0, y0, x1, y1 = map(float, seg)
-        dx, dy = x1 - x0, y1 - y0
-        length = math.hypot(dx, dy)
-        if not 2.0 <= length <= 12.0:
-            continue
-        mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        options = []
-        if abs(dx) >= abs(dy) * 3.0:
-            if min(x0, x1) <= roi_rect.x0 + edge_tol and max(x0, x1) >= roi_rect.x0 - edge_tol:
-                options.append(("left", abs(mx - roi_rect.x0), my, "y"))
-            if min(x0, x1) <= roi_rect.x1 + edge_tol and max(x0, x1) >= roi_rect.x1 - edge_tol:
-                options.append(("right", abs(mx - roi_rect.x1), my, "y"))
-        elif abs(dy) >= abs(dx) * 3.0:
-            if min(y0, y1) <= roi_rect.y0 + edge_tol and max(y0, y1) >= roi_rect.y0 - edge_tol:
-                options.append(("top", abs(my - roi_rect.y0), mx, "x"))
-            if min(y0, y1) <= roi_rect.y1 + edge_tol and max(y0, y1) >= roi_rect.y1 - edge_tol:
-                options.append(("bottom", abs(my - roi_rect.y1), mx, "x"))
-        if not options:
-            continue
-        edge, gap, coordinate, axis = min(options, key=lambda v: v[1])
-        if gap > edge_tol:
-            continue
-        key = (edge, round(coordinate / 2.0))
-        if key in seen:
-            continue
-        seen.add(key)
-        raw_ticks.append({"edge": edge, "axis": axis, "coordinate": coordinate,
-                          "seg": (x0, y0, x1, y1)})
-
-    if not raw_ticks:
-        return None
-
-    opposite = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
-
-    # Associate coordinate labels with the nearest edge mark only.
-    labelled: dict[tuple[str, int], list[dict]] = {}
-    for line in lines:
-        if not RMA_LAT_RE.match(line["text"].strip()):
-            continue
-        rect = line["rect"]
-        cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
-        rot, residual = _snap_rotation(_angle_cw_from_up(*line["up"]))
-        if abs(residual) > 8.0:
-            continue
-        edges = {
-            "left": (abs(cx - roi_rect.x0), "y", cy),
-            "right": (abs(roi_rect.x1 - cx), "y", cy),
-            "top": (abs(cy - roi_rect.y0), "x", cx),
-            "bottom": (abs(roi_rect.y1 - cy), "x", cx),
-        }
-        edge, distance, axis, coordinate = min(
-            ((name, *values) for name, values in edges.items()), key=lambda v: v[1]
-        )
-        if distance > max(18.0, min(width, height) * 0.035):
-            continue
-        nearby = [tick for tick in raw_ticks if tick["edge"] == edge
-                  and tick["axis"] == axis
-                  and abs(tick["coordinate"] - coordinate) <= max(
-                      5.0, rect.height * 0.6 if axis == "y" else rect.width * 0.6)]
-        if not nearby:
-            continue
-        tick = min(nearby, key=lambda t: abs(t["coordinate"] - coordinate))
-        key = (tick["edge"], round(tick["coordinate"] / 2.0))
-        labelled.setdefault(key, []).append({"rot": rot, "rect": rect, "tick": tick})
-
-    # Pair first; then enforce exactly one label across the two marks.
-    pairs = []
-    used: set[tuple[str, int]] = set()
-    for tick in raw_ticks:
-        key = (tick["edge"], round(tick["coordinate"] / 2.0))
-        if key in used:
-            continue
-        matches = [other for other in raw_ticks
-                   if other["edge"] == opposite[tick["edge"]]
-                   and other["axis"] == tick["axis"]
-                   and abs(other["coordinate"] - tick["coordinate"]) <= pair_tol]
-        if len(matches) != 1:
-            continue
-        other = matches[0]
-        other_key = (other["edge"], round(other["coordinate"] / 2.0))
-        used.update((key, other_key))
-        own_labels = labelled.get(key, [])
-        opposite_labels = labelled.get(other_key, [])
-        if len(own_labels) + len(opposite_labels) != 1:
-            continue
-        label = (own_labels or opposite_labels)[0]
-        pairs.append({"rot": label["rot"], "rect": label["rect"],
-                      "tick": tick["seg"], "opposite_tick": other["seg"],
-                      "axis": tick["axis"], "coordinate": tick["coordinate"]})
-
-    # Equal spacing is checked on the accepted, labelled pair series.
-    invalid_axes = set()
-    for axis in ("x", "y"):
-        series = sorted((p for p in pairs if p["axis"] == axis),
-                        key=lambda p: p["coordinate"])
-        if len(series) >= 3:
-            intervals = [series[i + 1]["coordinate"] - series[i]["coordinate"]
-                         for i in range(len(series) - 1)]
-            mean_interval = sum(intervals) / len(intervals)
-            tolerance = max(2.0, mean_interval * 0.08)
-            if mean_interval <= 0 or any(abs(v - mean_interval) > tolerance for v in intervals):
-                invalid_axes.add(axis)
-
-    accepted = [p for p in pairs if p["axis"] not in invalid_axes]
-    boxes = []
-    accepted_segments = set()
-    for item in accepted:
-        r = item["rect"]
-        boxes.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, item["rot"], 5.0, "lat_label", "RMA LAT"))
-        for kind, seg in (("lat_tick", item["tick"]),
-                          ("lat_opposite_tick", item["opposite_tick"])):
-            x0, y0, x1, y1 = seg
-            boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
-                                      item["rot"], 3.0, kind, "LAT TICK"))
-            accepted_segments.add(tuple(seg))
-
-    for tick in raw_ticks:
-        if tuple(tick["seg"]) in accepted_segments:
-            continue
-        x0, y0, x1, y1 = tick["seg"]
-        boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
-                                  0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
-
-    rotations = {p["rot"] for p in accepted}
-    if not accepted or len(rotations) != 1:
-        return {"rot": None, "n": len(accepted), "boxes": boxes, "ignored": True}
-    return {"rot": rotations.pop(), "n": len(accepted), "boxes": boxes, "ignored": False}
-
-def _detect_rma_orientation(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> OrientationResult:
-    lines = _collect_text_lines(page, roi_rect)
-    vote = _find_rma_latitude_vote(page, lines, roi_rect)
-    if vote is None:
-        return OrientationResult(0, "none", [], var_check="RMA_LAT_NOT_FOUND", text_lines=len(lines))
-    if vote["ignored"]:
-        return OrientationResult(0, "none", vote["boxes"], var_check="RMA_LAT_CONFLICT", text_lines=len(lines))
-    return OrientationResult(
-        vote["rot"], "lat_labels", vote["boxes"],
-        basis=f"rma_lat_ticks(n={vote['n']})",
-        var_check=f"RMA_LAT_OK(n={vote['n']})", text_lines=len(lines),
-    )
-
-
 def _detect_from_indicator(
     page: pymupdf.Page, roi_rect: pymupdf.Rect, allow_unlabeled_pair: bool = True
 ) -> OrientationResult:
@@ -1287,44 +1054,28 @@ def detect_page_orientation(page: pymupdf.Page, roi, category: str = "", procedu
             )
         return arrival
     if is_rma:
+        # Tick-mark scanning is intentionally disabled in the ROI/orientation stage.
+        # RMA orientation may use the independent color-altitude scale, but no edge ticks.
         lines = _collect_text_lines(page, roi_rect)
-        vote = _find_rma_latitude_vote(page, lines, roi_rect)
         scale = _detect_color_altitude_scale(page, lines, roi_rect)
         scale_refs = _reference_boxes_for_scale(scale) if scale else []
         scale_rot = scale["rot"] if scale else None
         if result.method == "none":
-            primary = vote if vote and not vote["ignored"] else None
-            if primary is None and scale_rot is None:
-                refs = vote["boxes"] if vote else []
-                return OrientationResult(0, "none", refs + scale_refs,
-                    var_check="RMA_LAT_AND_SCALE_NOT_FOUND" if vote is None else "RMA_REFERENCES_CONFLICT_OR_SCALE_NOT_FOUND",
-                    basis="rma_lat+color_altitude", text_lines=len(lines))
-            if primary is not None and scale_rot is not None and primary["rot"] != scale_rot:
-                return OrientationResult(0, "none", primary["boxes"] + scale_refs,
-                    var_check=f"RMA_REFERENCE_CONFLICT(LAT={primary['rot']},SCALE={scale_rot})",
-                    basis="rma_lat+color_altitude", text_lines=len(lines))
-            chosen = primary["rot"] if primary is not None else scale_rot
-            refs = (primary["boxes"] if primary is not None else (vote["boxes"] if vote else [])) + scale_refs
-            basis = "rma_lat+color_altitude" if primary is not None and scale_rot is not None else ("rma_lat_ticks" if primary is not None else "color_altitude")
-            return OrientationResult(chosen, "lat_labels" if primary is not None else "rma_references",
-                refs, basis=basis, var_check="RMA_REFERENCES_AGREE" if primary is not None and scale_rot is not None else "RMA_SINGLE_REFERENCE",
+            if scale_rot is None:
+                return OrientationResult(0, "none", scale_refs,
+                    var_check="RMA_COLOR_ALTITUDE_SCALE_NOT_FOUND",
+                    basis="color_altitude", text_lines=len(lines))
+            return OrientationResult(scale_rot, "rma_references", scale_refs,
+                basis="color_altitude", var_check="RMA_SINGLE_REFERENCE",
                 text_lines=len(lines))
-        refs = list(result.references) + (vote["boxes"] if vote else []) + scale_refs
         check = result.var_check
-        if vote is not None:
-            if vote["ignored"]:
-                check += "; RMA_LAT_CONFLICT"
-            elif vote["rot"] == result.rotation_cw:
-                check += f"; RMA_LAT_AGREE(n={vote['n']})"
-            else:
-                check += f"; RMA_LAT_CONFLICT(lat={vote['rot']}) -> VAR wins"
         if scale_rot is not None:
             if scale_rot == result.rotation_cw:
                 check += "; RMA_SCALE_AGREE"
             else:
                 check += f"; RMA_SCALE_CONFLICT(scale={scale_rot}) -> VAR wins"
         result = OrientationResult(
-            result.rotation_cw, result.method, refs,
+            result.rotation_cw, result.method, list(result.references) + scale_refs,
             var_text=result.var_text, year=result.year,
             north_angle_deg=result.north_angle_deg, residual_deg=result.residual_deg,
             var_check=check, basis=result.basis, text_lines=max(result.text_lines, len(lines)),

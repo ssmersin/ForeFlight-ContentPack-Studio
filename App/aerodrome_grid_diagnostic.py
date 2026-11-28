@@ -147,8 +147,9 @@ def _calculated_complement(candidates, width, height, labels):
 def detect_page_grid_candidates(page: pymupdf.Page):
     """Stage 02: visible horizontal vectors are LAT; visible vertical are LONG."""
     width, height = float(page.rect.width), float(page.rect.height)
-    lat = _merge_segments(_visible_segments(page, True))
-    lon = _merge_segments(_visible_segments(page, False))
+    merge_gap = max(36.0, max(width, height) * 0.08)
+    lat = _merge_segments(_visible_segments(page, True), max_gap=merge_gap)
+    lon = _merge_segments(_visible_segments(page, False), max_gap=merge_gap)
 
     # Reject only page-frame neighbourhoods. Do not require a line to span
     # half the page: interrupted and partially obscured grid vectors are valid.
@@ -179,32 +180,45 @@ def save_grid_diagnostic(source_pdf: Path, output_image: Path):
         candidates = detect_page_grid_candidates(page)
         width, height = float(page.rect.width), float(page.rect.height)
 
+        # Drawing APIs use unrotated PDF coordinates. Map visible geometry back
+        # for annotation only; this does not rotate or modify the source PDF.
+        derotation = page.derotation_matrix
+
+        def raw_point(x, y):
+            return pymupdf.Point(x, y) * derotation
+
+        def draw_visible_line(p1, p2, **kwargs):
+            page.draw_line(raw_point(*p1), raw_point(*p2), **kwargs)
+
+        def insert_visible_text(point, text, **kwargs):
+            page.insert_text(raw_point(*point), text, **kwargs)
+
         # Extend every accepted grid candidate over the complete visible page.
         for axis, color in (("LAT", (1, 0, 0)), ("LONG", (0, 0.25, 1))):
             for index, item in enumerate(candidates[axis], 1):
                 fixed, _start, _end, label, _value = item
                 if axis == "LAT":
-                    page.draw_line((0, fixed), (width, fixed), color=color, width=1.25, overlay=True)
+                    draw_visible_line((0, fixed), (width, fixed), color=color, width=1.25, overlay=True)
                     caption = label or f"LAT candidate {index}"
-                    page.insert_text((5, max(10, fixed - 3)), caption,
+                    insert_visible_text((5, max(10, fixed - 3)), caption,
                                      fontsize=7, color=color, overlay=True)
                 else:
-                    page.draw_line((fixed, 0), (fixed, height), color=color, width=1.25, overlay=True)
+                    draw_visible_line((fixed, 0), (fixed, height), color=color, width=1.25, overlay=True)
                     caption = label or f"LONG candidate {index}"
-                    page.insert_text((fixed + 3, 12), caption,
+                    insert_visible_text((fixed + 3, 12), caption,
                                      fontsize=7, color=color, overlay=True)
 
         for index, item in enumerate(candidates["CALCULATED"], 1):
             fixed, _start, _end, _label, _value = item
             if candidates["calculation"]["axis"] == "LAT":
-                page.draw_line((0, fixed), (width, fixed), color=(0.1, 0.65, 0.1),
+                draw_visible_line((0, fixed), (width, fixed), color=(0.1, 0.65, 0.1),
                                width=1.5, dashes="[5 3]", overlay=True)
-                page.insert_text((5, max(10, fixed - 3)), f"LAT CALCULATED {index}",
+                insert_visible_text((5, max(10, fixed - 3)), f"LAT CALCULATED {index}",
                                  fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
             else:
-                page.draw_line((fixed, 0), (fixed, height), color=(0.1, 0.65, 0.1),
+                draw_visible_line((fixed, 0), (fixed, height), color=(0.1, 0.65, 0.1),
                                width=1.5, dashes="[5 3]", overlay=True)
-                page.insert_text((fixed + 3, 12), f"LONG CALCULATED {index}",
+                insert_visible_text((fixed + 3, 12), f"LONG CALCULATED {index}",
                                  fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
 
         output_image.parent.mkdir(parents=True, exist_ok=True)

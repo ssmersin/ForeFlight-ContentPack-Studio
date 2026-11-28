@@ -990,12 +990,12 @@ def _find_rma_latitude_vote(
     lines: list[dict],
     roi_rect: pymupdf.Rect,
 ) -> Optional[dict]:
-    """Use only edge ticks that satisfy the RMA grid geometry and label rules.
+    """Accept only labelled, opposite-edge RMA tick pairs.
 
-    A tick must lie on an ROI edge. Multiple ticks along one axis must form
-    opposite-edge pairs at the same pixel coordinate. A single unpaired tick
-    is permitted only when it has a coordinate label. Each pair has exactly
-    one label, and a series of three or more coordinates must be evenly spaced.
+    A candidate is a genuine tick only when a short straight segment crosses
+    an ROI edge, has a counterpart on the opposite edge at the same pixel
+    coordinate, and exactly one of those two marks has a coordinate label.
+    Unpaired marks and unlabelled pairs never vote.
     """
     width, height = roi_rect.width, roi_rect.height
     if width <= 0 or height <= 0:
@@ -1009,7 +1009,7 @@ def _find_rma_latitude_vote(
                 continue
             rect = pymupdf.Rect(item[1]) * rm
             rect.normalize()
-            if not roi_rect.intersects(rect):
+            if not _overlap(rect, roi_rect):
                 continue
             if 1.5 <= rect.width <= 16.0 and rect.height <= 2.5:
                 segments.append((rect.x0, (rect.y0 + rect.y1) / 2.0,
@@ -1018,185 +1018,141 @@ def _find_rma_latitude_vote(
                 segments.append(((rect.x0 + rect.x1) / 2.0, rect.y0,
                                  (rect.x0 + rect.x1) / 2.0, rect.y1))
 
-    edge_tol = max(3.0, min(6.0, min(width, height) * 0.006))
-    pair_tol = 4.5
+    edge_tol = max(2.0, min(4.0, min(width, height) * 0.004))
+    pair_tol = 3.0
     raw_ticks: list[dict] = []
     seen: set[tuple[str, int]] = set()
 
-    # Normalize every short segment into one of four ROI-edge tick families.
+    # Only short, almost perpendicular strokes that physically cross an ROI
+    # boundary are candidates. Merely being close to the boundary is not enough.
     for seg in segments:
         x0, y0, x1, y1 = map(float, seg)
-        length = math.hypot(x1 - x0, y1 - y0)
-        if not 1.5 <= length <= 16.0:
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if not 2.0 <= length <= 12.0:
             continue
         mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        horizontal = abs(x1 - x0) >= abs(y1 - y0) * 1.5
-        vertical = abs(y1 - y0) >= abs(x1 - x0) * 1.5
         options = []
-        if horizontal:
-            options.extend((("left", abs(mx - roi_rect.x0), my, "y"),
-                            ("right", abs(mx - roi_rect.x1), my, "y")))
-        if vertical:
-            options.extend((("top", abs(my - roi_rect.y0), mx, "x"),
-                            ("bottom", abs(my - roi_rect.y1), mx, "x")))
+        if abs(dx) >= abs(dy) * 3.0:
+            if min(x0, x1) <= roi_rect.x0 + edge_tol and max(x0, x1) >= roi_rect.x0 - edge_tol:
+                options.append(("left", abs(mx - roi_rect.x0), my, "y"))
+            if min(x0, x1) <= roi_rect.x1 + edge_tol and max(x0, x1) >= roi_rect.x1 - edge_tol:
+                options.append(("right", abs(mx - roi_rect.x1), my, "y"))
+        elif abs(dy) >= abs(dx) * 3.0:
+            if min(y0, y1) <= roi_rect.y0 + edge_tol and max(y0, y1) >= roi_rect.y0 - edge_tol:
+                options.append(("top", abs(my - roi_rect.y0), mx, "x"))
+            if min(y0, y1) <= roi_rect.y1 + edge_tol and max(y0, y1) >= roi_rect.y1 - edge_tol:
+                options.append(("bottom", abs(my - roi_rect.y1), mx, "x"))
         if not options:
             continue
-        edge, gap, coordinate, axis = min(options, key=lambda item: item[1])
-        edge_coord = {"left": roi_rect.x0, "right": roi_rect.x1,
-                      "top": roi_rect.y0, "bottom": roi_rect.y1}[edge]
-        edge_span = (min(x0, x1) <= edge_coord + edge_tol
-                     and max(x0, x1) >= edge_coord - edge_tol) if axis == "y" else (
-                     min(y0, y1) <= edge_coord + edge_tol
-                     and max(y0, y1) >= edge_coord - edge_tol)
-        if gap > edge_tol or not edge_span:
+        edge, gap, coordinate, axis = min(options, key=lambda v: v[1])
+        if gap > edge_tol:
             continue
-        dedupe_key = (edge, round(coordinate / 2.0))
-        if dedupe_key in seen:
+        key = (edge, round(coordinate / 2.0))
+        if key in seen:
             continue
-        seen.add(dedupe_key)
+        seen.add(key)
         raw_ticks.append({"edge": edge, "axis": axis, "coordinate": coordinate,
-                          "gap": gap, "seg": (x0, y0, x1, y1)})
+                          "seg": (x0, y0, x1, y1)})
 
     if not raw_ticks:
         return None
 
-    opposite = {"left": "right", "right": "left",
-                "top": "bottom", "bottom": "top"}
-    labels = []
+    opposite = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+
+    # Associate coordinate labels with the nearest edge mark only.
+    labelled: dict[tuple[str, int], list[dict]] = {}
     for line in lines:
         if not RMA_LAT_RE.match(line["text"].strip()):
             continue
         rect = line["rect"]
-        cx = (rect.x0 + rect.x1) / 2.0
-        cy = (rect.y0 + rect.y1) / 2.0
+        cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
         rot, residual = _snap_rotation(_angle_cw_from_up(*line["up"]))
         if abs(residual) > 8.0:
             continue
-        edge_distances = {
-            "left": abs(cx - roi_rect.x0), "right": abs(roi_rect.x1 - cx),
-            "top": abs(cy - roi_rect.y0), "bottom": abs(roi_rect.y1 - cy),
+        edges = {
+            "left": (abs(cx - roi_rect.x0), "y", cy),
+            "right": (abs(roi_rect.x1 - cx), "y", cy),
+            "top": (abs(cy - roi_rect.y0), "x", cx),
+            "bottom": (abs(roi_rect.y1 - cy), "x", cx),
         }
-        edge = min(edge_distances, key=edge_distances.get)
-        if edge_distances[edge] > max(24.0, min(width, height) * 0.045):
+        edge, distance, axis, coordinate = min(
+            ((name, *values) for name, values in edges.items()), key=lambda v: v[1]
+        )
+        if distance > max(18.0, min(width, height) * 0.035):
             continue
-        axis = "y" if edge in ("left", "right") else "x"
-        coordinate = cy if axis == "y" else cx
-        nearby = [tick for tick in raw_ticks
-                  if tick["edge"] == edge
+        nearby = [tick for tick in raw_ticks if tick["edge"] == edge
+                  and tick["axis"] == axis
                   and abs(tick["coordinate"] - coordinate) <= max(
-                      6.0, rect.height * 0.75 if axis == "y" else rect.width * 0.75)]
+                      5.0, rect.height * 0.6 if axis == "y" else rect.width * 0.6)]
         if not nearby:
             continue
-        tick = min(nearby, key=lambda item: item["gap"] +
-                   abs(item["coordinate"] - coordinate))
-        labels.append({"rot": rot, "rect": rect, "tick": tick})
-
-    # A physical tick may be associated with exactly one coordinate label.
-    by_tick: dict[tuple[str, int], list[dict]] = {}
-    for label in labels:
-        tick = label["tick"]
+        tick = min(nearby, key=lambda t: abs(t["coordinate"] - coordinate))
         key = (tick["edge"], round(tick["coordinate"] / 2.0))
-        by_tick.setdefault(key, []).append(label)
-    labels = [items[0] for items in by_tick.values() if len(items) == 1]
-    # A left/right (or top/bottom) pair may have one label total, never two.
-    unique_pair_labels = []
-    for label in labels:
-        tick = label["tick"]
-        same_pair = [other for other in labels
-                     if other["tick"]["axis"] == tick["axis"]
-                     and abs(other["tick"]["coordinate"] - tick["coordinate"]) <= pair_tol]
-        if len(same_pair) == 1:
-            unique_pair_labels.append(label)
-    labels = unique_pair_labels
-    if not labels:
-        # Preserve rejected tick marks in diagnostics; they cannot vote.
-        rejected_boxes = []
-        for tick in raw_ticks:
-            x0, y0, x1, y1 = tick["seg"]
-            rejected_boxes.append(ReferenceBox(min(x0, x1), min(y0, y1),
-                max(x0, x1), max(y0, y1), 0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
-        return {"rot": None, "n": 0, "boxes": rejected_boxes, "ignored": True}
+        labelled.setdefault(key, []).append({"rot": rot, "rect": rect, "tick": tick})
 
-    # Build one candidate per labelled coordinate. If there are several
-    # coordinates on an axis, each must have its opposite-edge counterpart.
-    candidates = []
-    for label in labels:
-        tick = label["tick"]
-        matching = [other for other in raw_ticks
-                    if other["edge"] == opposite[tick["edge"]]
-                    and other["axis"] == tick["axis"]
-                    and abs(other["coordinate"] - tick["coordinate"]) <= pair_tol]
-        axis_ticks = [other for other in raw_ticks if other["axis"] == tick["axis"]]
-        if matching:
-            opposite_tick = min(matching, key=lambda item: abs(item["coordinate"] - tick["coordinate"]))
-        elif len(axis_ticks) == 1:
-            # A lone tick is accepted only because this candidate has a label.
-            opposite_tick = None
-        else:
+    # Pair first; then enforce exactly one label across the two marks.
+    pairs = []
+    used: set[tuple[str, int]] = set()
+    for tick in raw_ticks:
+        key = (tick["edge"], round(tick["coordinate"] / 2.0))
+        if key in used:
             continue
-        candidates.append({"rot": label["rot"], "rect": label["rect"],
-                           "tick": tick["seg"],
-                           "opposite_tick": opposite_tick["seg"] if opposite_tick else None,
-                           "axis": tick["axis"], "coordinate": tick["coordinate"]})
+        matches = [other for other in raw_ticks
+                   if other["edge"] == opposite[tick["edge"]]
+                   and other["axis"] == tick["axis"]
+                   and abs(other["coordinate"] - tick["coordinate"]) <= pair_tol]
+        if len(matches) != 1:
+            continue
+        other = matches[0]
+        other_key = (other["edge"], round(other["coordinate"] / 2.0))
+        used.update((key, other_key))
+        own_labels = labelled.get(key, [])
+        opposite_labels = labelled.get(other_key, [])
+        if len(own_labels) + len(opposite_labels) != 1:
+            continue
+        label = (own_labels or opposite_labels)[0]
+        pairs.append({"rot": label["rot"], "rect": label["rect"],
+                      "tick": tick["seg"], "opposite_tick": other["seg"],
+                      "axis": tick["axis"], "coordinate": tick["coordinate"]})
 
-    if not candidates:
-        rejected_boxes = []
-        for tick in raw_ticks:
-            x0, y0, x1, y1 = tick["seg"]
-            rejected_boxes.append(ReferenceBox(min(x0, x1), min(y0, y1),
-                max(x0, x1), max(y0, y1), 0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
-        return {"rot": None, "n": 0, "boxes": rejected_boxes, "ignored": True}
-
-    # Validate spacing against the complete detected pair series, not only
-    # the subset that happens to carry labels.
+    # Equal spacing is checked on the accepted, labelled pair series.
     invalid_axes = set()
     for axis in ("x", "y"):
-        paired_coordinates = []
-        for tick in raw_ticks:
-            if tick["axis"] != axis:
-                continue
-            if any(other["edge"] == opposite[tick["edge"]]
-                   and other["axis"] == axis
-                   and abs(other["coordinate"] - tick["coordinate"]) <= pair_tol
-                   for other in raw_ticks):
-                if not any(abs(tick["coordinate"] - old) <= pair_tol for old in paired_coordinates):
-                    paired_coordinates.append(tick["coordinate"])
-        paired_coordinates.sort()
-        if len(paired_coordinates) >= 3:
-            intervals = [paired_coordinates[i + 1] - paired_coordinates[i]
-                         for i in range(len(paired_coordinates) - 1)]
+        series = sorted((p for p in pairs if p["axis"] == axis),
+                        key=lambda p: p["coordinate"])
+        if len(series) >= 3:
+            intervals = [series[i + 1]["coordinate"] - series[i]["coordinate"]
+                         for i in range(len(series) - 1)]
             mean_interval = sum(intervals) / len(intervals)
-            tolerance = max(2.5, mean_interval * 0.10)
-            if mean_interval <= 0 or any(abs(value - mean_interval) > tolerance
-                                         for value in intervals):
+            tolerance = max(2.0, mean_interval * 0.08)
+            if mean_interval <= 0 or any(abs(v - mean_interval) > tolerance for v in intervals):
                 invalid_axes.add(axis)
 
-    valid_candidates = [item for item in candidates if item["axis"] not in invalid_axes]
-    rotations = {item["rot"] for item in valid_candidates}
+    accepted = [p for p in pairs if p["axis"] not in invalid_axes]
     boxes = []
-    for item in valid_candidates:
+    accepted_segments = set()
+    for item in accepted:
         r = item["rect"]
         boxes.append(ReferenceBox(r.x0, r.y0, r.x1, r.y1, item["rot"], 5.0, "lat_label", "RMA LAT"))
         for kind, seg in (("lat_tick", item["tick"]),
                           ("lat_opposite_tick", item["opposite_tick"])):
-            if seg is not None:
-                x0, y0, x1, y1 = seg
-                boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
-                                          item["rot"], 3.0, kind, "LAT TICK"))
-    accepted_segments = set()
-    for item in valid_candidates:
-        accepted_segments.add(tuple(item["tick"]))
-        if item["opposite_tick"] is not None:
-            accepted_segments.add(tuple(item["opposite_tick"]))
+            x0, y0, x1, y1 = seg
+            boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+                                      item["rot"], 3.0, kind, "LAT TICK"))
+            accepted_segments.add(tuple(seg))
+
     for tick in raw_ticks:
         if tuple(tick["seg"]) in accepted_segments:
             continue
         x0, y0, x1, y1 = tick["seg"]
         boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
                                   0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
-    if not valid_candidates or len(rotations) != 1:
-        return {"rot": None, "n": len(valid_candidates), "boxes": boxes, "ignored": True}
-    return {"rot": rotations.pop(), "n": len(valid_candidates), "boxes": boxes, "ignored": False}
+
+    rotations = {p["rot"] for p in accepted}
+    if not accepted or len(rotations) != 1:
+        return {"rot": None, "n": len(accepted), "boxes": boxes, "ignored": True}
+    return {"rot": rotations.pop(), "n": len(accepted), "boxes": boxes, "ignored": False}
 
 def _detect_rma_orientation(page: pymupdf.Page, roi_rect: pymupdf.Rect) -> OrientationResult:
     lines = _collect_text_lines(page, roi_rect)

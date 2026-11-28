@@ -8,7 +8,7 @@ import pymupdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orientation_turn import _approach_orientation
+from orientation_turn import _approach_orientation, detect_page_orientation
 
 
 class ApproachFeatureDetectionTests(unittest.TestCase):
@@ -28,6 +28,18 @@ class ApproachFeatureDetectionTests(unittest.TestCase):
 
         result = _approach_orientation(self.page, self.roi)
 
+        self.assertFalse(any("tick" in reference.kind.lower() for reference in result.references))
+
+    def test_rma_edge_ticks_do_not_create_orientation_votes(self):
+        self.page.draw_line((46, 100), (54, 100), color=(0, 0, 0), width=1)
+        self.page.draw_line((446, 100), (454, 100), color=(0, 0, 0), width=1)
+        self.page.insert_text((54, 103), "35-10N", fontsize=7)
+
+        result = detect_page_orientation(
+            self.page, self.roi, category="RMA", procedure="RADAR MINIMUM ALTITUDE"
+        )
+
+        self.assertEqual(result.method, "none")
         self.assertFalse(any("tick" in reference.kind.lower() for reference in result.references))
 
     def test_approach_boxes_and_airport_coordinates_are_retained(self):

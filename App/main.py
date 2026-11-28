@@ -40,9 +40,9 @@ def main() -> int:
 
     hedef_root = Path(__file__).resolve().parent.parent / "HEDEF"
     initial_dir = args.output.expanduser().resolve()
-    first_dir = hedef_root / "01-First"
-    diagnostic_dir = hedef_root / "01-First-Diagnostic"
-    turn_diag_dir = hedef_root / "01-ROI-Orientation-Diagnostic"
+    first_dir = hedef_root / "01-Rotation"
+    diagnostic_dir = hedef_root / "01-Rotation-Diagnostic"
+    turn_diag_dir = hedef_root / "01-Orientation-Diagnostic"
 
     try:
         metadata = read_cover_metadata(source)
@@ -82,30 +82,33 @@ def main() -> int:
     print(f"Filename date : {metadata.effective_date}")
     print(f"Chart pages   : {len(charts)}")
     print(f"PDF exports   : {len(generated)}")
-    print(f"01-ROI+Orientation: {len(first_exports)} (skipped: {len(skipped_first)})")
+    print(f"01-Rotation: {len(first_exports)} (skipped: {len(skipped_first)})")
     for name in skipped_first:
         print(f"00-INITIAL REMAINED (no closed frame): {name}")
     if args.diagnostic:
-        print(f"01-First-Diag : {len(diag_exports)}")
+        print(f"01-Rotation-Diag: {len(diag_exports)}")
     grid_diagnostics = []
     if args.diagnostic:
         grid_diagnostics = run_aerodrome_grid_diagnostics(
             input_dir=first_dir,
-            output_dir=hedef_root / "03-Grid-Diagnostic",
+            output_dir=hedef_root / "02-GeoPDF-Diagnostic",
             charts=charts,
         )
-        print(f"03-Grid-Diagnostic: {len(grid_diagnostics)}")
-        for name, lat_count, long_count in grid_diagnostics:
-            print(f"  GRID {name}: LAT={lat_count}, LONG={long_count}")
+        print(f"02-GeoPDF-Diagnostic: {len(grid_diagnostics)}")
+        for name, counts in grid_diagnostics:
+            print(
+                f"  GRID {name}: LAT={counts['LAT']}, LONG={counts['LONG']}, "
+                f"CALCULATED={counts['CALCULATED']}, COORD-LABELS={counts['labels']}"
+            )
 
     print(f"Orientation rotated: {len(rotated_items)}")
     for fname, rot_deg, method in rotated_items:
         print(f"  ROTATED {rot_deg}° CW [{method}]: {fname}")
     if args.diagnostic:
-        print(f"02-Turn-Diag  : {len(turn_diag_exports)}")
+        print(f"01-Orientation-Diag: {len(turn_diag_exports)}")
     print(f"Unresolved    : {len(unresolved)}")
     print(f"Initial folder: {initial_dir}")
-    print(f"Stage 01 folder: {first_dir}")
+    print(f"Stage 01 (Rotation) folder: {first_dir}")
     print(f"Chart manifest: {manifest.resolve()}")
     print(f"ROI manifest  : {(first_dir / 'roi_manifest.json').resolve()}")
     for page_number, reason in unresolved:

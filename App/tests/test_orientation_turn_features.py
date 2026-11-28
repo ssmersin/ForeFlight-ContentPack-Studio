@@ -114,6 +114,26 @@ class RmaEdgeTickValidationTests(unittest.TestCase):
         self.assertIsNotNone(rejected)
         self.assertTrue(rejected["ignored"])
 
+
+    def test_pair_with_labels_on_both_edges_is_rejected(self):
+        self.add_pair(150)
+        self.add_left_label(150)
+        self.page.insert_text((420, 153), "35-10N", fontsize=7)
+
+        rejected = self.vote()
+        self.assertIsNotNone(rejected)
+        self.assertTrue(rejected["ignored"])
+
+    def test_equal_tick_intervals_are_accepted(self):
+        for y, label in ((100, "35-10N"), (200, "35-11N"), (300, "35-12N")):
+            self.add_pair(y)
+            self.add_left_label(y, label)
+
+        vote = self.vote()
+        self.assertIsNotNone(vote)
+        self.assertFalse(vote["ignored"])
+        self.assertEqual(vote["n"], 3)
+
     def test_irregular_tick_intervals_are_rejected(self):
         for y, label in ((100, "35-10N"), (200, "35-11N"), (330, "35-12N")):
             self.add_pair(y)

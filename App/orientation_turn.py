@@ -1044,10 +1044,10 @@ def _find_rma_latitude_vote(
         edge, gap, coordinate, axis = min(options, key=lambda item: item[1])
         edge_coord = {"left": roi_rect.x0, "right": roi_rect.x1,
                       "top": roi_rect.y0, "bottom": roi_rect.y1}[edge]
-        edge_span = (min(x0, x1) - edge_coord <= edge_tol
-                     and max(x0, x1) + edge_tol >= edge_coord) if axis == "y" else (
-                     min(y0, y1) - edge_coord <= edge_tol
-                     and max(y0, y1) + edge_tol >= edge_coord)
+        edge_span = (min(x0, x1) <= edge_coord + edge_tol
+                     and max(x0, x1) >= edge_coord - edge_tol) if axis == "y" else (
+                     min(y0, y1) <= edge_coord + edge_tol
+                     and max(y0, y1) >= edge_coord - edge_tol)
         if gap > edge_tol or not edge_span:
             continue
         dedupe_key = (edge, round(coordinate / 2.0))
@@ -1140,7 +1140,12 @@ def _find_rma_latitude_vote(
                            "axis": tick["axis"], "coordinate": tick["coordinate"]})
 
     if not candidates:
-        return None
+        rejected_boxes = []
+        for tick in raw_ticks:
+            x0, y0, x1, y1 = tick["seg"]
+            rejected_boxes.append(ReferenceBox(min(x0, x1), min(y0, y1),
+                max(x0, x1), max(y0, y1), 0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
+        return {"rot": None, "n": 0, "boxes": rejected_boxes, "ignored": True}
 
     # Validate spacing against the complete detected pair series, not only
     # the subset that happens to carry labels.

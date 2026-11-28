@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
@@ -11,19 +12,30 @@ import pymupdf
 from orientation_turn import _collect_text_lines
 
 
+# Supports both decimal minutes (40° 19.09' N) and DMS
+# (40°19'00'' N), including the FLIP font-decoded quote variants.
 _COORD_RE = re.compile(
-    r"(?<!\\d)(\\d{1,2})(?:\\s*[°º˚]\\s*|\\s+)(\\d{1,2}(?:[.,]\\d+)?)\\s*['′’]?\\s*([NSEW])\\b",
+    r"(?<!\d)(\d{1,3})\s*[°º˚]\s*(\d{1,2}(?:[.,]\d+)?)"
+    r"(?:\s*['′’]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:[\"″”]{1,2})?)?"
+    r"\s*([NSEW])\b",
     re.IGNORECASE,
 )
 
 
-def _visible_segments(page: pymupdf.Page, horizontal: bool):
-    """Read vector geometry from the final Stage-01 PDF in its visible page axes.
+def _expanded_roi(roi: pymupdf.Rect, page: pymupdf.Page) -> pymupdf.Rect:
+    """Include the chart-edge coordinate labels just outside the neatline."""
+    margin_x = page.rect.width * 0.045
+    margin_y = page.rect.height * 0.045
+    return pymupdf.Rect(
+        max(page.rect.x0, roi.x0 - margin_x),
+        max(page.rect.y0, roi.y0 - margin_y),
+        min(page.rect.x1, roi.x1 + margin_x),
+        min(page.rect.y1, roi.y1 + margin_y),
+    )
 
-    PyMuPDF exposes drawing points in the PDF's unrotated coordinate system.
-    Applying page.rotation_matrix here only maps coordinates to the already-
-    rotated page view; it does not rotate, rewrite, or otherwise modify the PDF.
-    """
+
+def _visible_segments(page: pymupdf.Page, horizontal: bool, roi: pymupdf.Rect):
+    """Extract only vector segments crossing the ROI, in visible-page axes."""
     matrix = page.rotation_matrix
     found = []
     for drawing in page.get_drawings():
@@ -32,15 +44,21 @@ def _visible_segments(page: pymupdf.Page, horizontal: bool):
                 continue
             p1, p2 = item[1] * matrix, item[2] * matrix
             dx, dy = abs(p2.x - p1.x), abs(p2.y - p1.y)
-            if horizontal and dy <= 1.6 and dx >= 5:
-                found.append(((p1.y + p2.y) / 2, min(p1.x, p2.x), max(p1.x, p2.x)))
-            elif not horizontal and dx <= 1.6 and dy >= 5:
-                found.append(((p1.x + p2.x) / 2, min(p1.y, p2.y), max(p1.y, p2.y)))
+            if horizontal and dy <= 1.6:
+                fixed = (p1.y + p2.y) / 2
+                start, end = min(p1.x, p2.x), max(p1.x, p2.x)
+                if roi.y0 <= fixed <= roi.y1 and end >= roi.x0 and start <= roi.x1:
+                    found.append((fixed, max(start, roi.x0), min(end, roi.x1)))
+            elif not horizontal and dx <= 1.6:
+                fixed = (p1.x + p2.x) / 2
+                start, end = min(p1.y, p2.y), max(p1.y, p2.y)
+                if roi.x0 <= fixed <= roi.x1 and end >= roi.y0 and start <= roi.y1:
+                    found.append((fixed, max(start, roi.y0), min(end, roi.y1)))
     return found
 
 
-def _merge_segments(segments, tolerance=2.2, max_gap=36.0):
-    """Cluster collinear fragments and bridge table/artwork interruptions."""
+def _merge_segments(segments, tolerance=2.2, max_gap=24.0):
+    """Merge fragments only when they are collinear and spatially adjacent."""
     clusters = []
     for fixed, start, end in sorted(segments, key=lambda item: (item[0], item[1])):
         match = next(
@@ -58,111 +76,187 @@ def _merge_segments(segments, tolerance=2.2, max_gap=36.0):
             match[1] = min(match[1], start)
             match[2] = max(match[2], end)
             match[3] += 1
-    return [(r[0], r[1], r[2]) for r in clusters]
+    return [(row[0], row[1], row[2]) for row in clusters]
 
 
-def _coordinate_labels(page: pymupdf.Page):
-    """Return decoded coordinate labels in visible-page coordinates."""
+def _coordinate_labels(page: pymupdf.Page, roi: pymupdf.Rect):
+    """Decode coordinate labels only in/along the chart ROI."""
     labels = []
-    # _collect_text_lines handles FLIP fonts without ToUnicode and page rotation.
-    for line in _collect_text_lines(page, page.rect):
-        text = line["text"]
-        for match in _COORD_RE.finditer(text):
-            degrees = float(match.group(1)) + float(match.group(2).replace(",", ".")) / 60.0
-            hemisphere = match.group(3).upper()
+    for line in _collect_text_lines(page, roi):
+        for match in _COORD_RE.finditer(line["text"]):
+            degrees = float(match.group(1))
+            minutes = float(match.group(2).replace(",", "."))
+            seconds = float((match.group(3) or "0").replace(",", "."))
+            value = degrees + minutes / 60.0 + seconds / 3600.0
+            hemisphere = match.group(4).upper()
             if hemisphere in ("S", "W"):
-                degrees = -degrees
+                value = -value
             rect = line["rect"]
             labels.append({
                 "text": match.group(0).strip(),
                 "axis": "LAT" if hemisphere in ("N", "S") else "LONG",
-                "value": degrees,
+                "hemisphere": hemisphere,
+                "value": value,
                 "x": (rect.x0 + rect.x1) / 2,
                 "y": (rect.y0 + rect.y1) / 2,
             })
-    return labels
+    # Remove duplicate labels emitted by adjacent text spans.
+    unique = {}
+    for label in labels:
+        key = (label["axis"], round(label["value"], 7), round(label["x"], 1), round(label["y"], 1))
+        unique[key] = label
+    return list(unique.values())
 
 
-def _attach_labels(candidates, labels, axis):
-    for index, (fixed, start, end) in enumerate(candidates):
-        eligible = [label for label in labels if label["axis"] == axis]
-        if axis == "LAT":
-            nearby = [v for v in eligible if start - 30 <= v["x"] <= end + 30]
-            nearby.sort(key=lambda v: abs(v["y"] - fixed))
-        else:
-            nearby = [v for v in eligible if start - 30 <= v["y"] <= end + 30]
-            nearby.sort(key=lambda v: abs(v["x"] - fixed))
-        if nearby:
-            candidates[index] = (fixed, start, end, nearby[0]["text"], nearby[0]["value"])
-        else:
-            candidates[index] = (fixed, start, end, "", None)
-    return candidates
+def _format_coordinate(value: float, axis: str, hemisphere_hint: str = "") -> str:
+    hemisphere = hemisphere_hint or (
+        ("N" if value >= 0 else "S") if axis == "LAT"
+        else ("E" if value >= 0 else "W")
+    )
+    absolute = abs(value)
+    degrees = int(absolute)
+    minutes_float = (absolute - degrees) * 60.0
+    minutes = int(minutes_float)
+    seconds = int(round((minutes_float - minutes) * 60.0))
+    if seconds >= 60:
+        seconds = 0
+        minutes += 1
+    if minutes >= 60:
+        minutes = 0
+        degrees += 1
+    return f"{degrees:02d} {minutes:02d} {seconds:02d} {hemisphere}"
 
 
-def _calculated_complement(candidates, width, height, labels):
-    """Estimate missing LAT lines from LONG spacing (or vice versa).
+def _match_grid_lines(segments, labels, axis, roi):
+    """Accept a vector line only when an axis-matching coordinate label anchors it."""
+    horizontal = axis == "LAT"
+    dimension = roi.height if horizontal else roi.width
+    min_length = dimension * 0.42
+    max_distance = max(22.0, dimension * 0.035)
+    candidates = [
+        segment for segment in segments
+        if segment[2] - segment[1] >= min_length
+    ]
+    accepted = []
+    for label in (item for item in labels if item["axis"] == axis):
+        nearby = []
+        for segment in candidates:
+            fixed, start, end = segment
+            along = label["x"] if horizontal else label["y"]
+            if start - 28.0 <= along <= end + 28.0:
+                distance = abs((label["y"] if horizontal else label["x"]) - fixed)
+                if distance <= max_distance:
+                    nearby.append((distance, segment))
+        if not nearby:
+            continue
+        distance, segment = min(nearby, key=lambda item: item[0])
+        existing = next(
+            (item for item in accepted if abs(item[0] - segment[0]) <= 2.5),
+            None,
+        )
+        record = (segment[0], segment[1], segment[2], label["text"], label["value"], label["hemisphere"])
+        if existing is None:
+            accepted.append(record)
+        elif distance < abs(existing[0] - (label["y"] if horizontal else label["x"])):
+            accepted[accepted.index(existing)] = record
+    accepted.sort(key=lambda item: item[0])
+    return accepted
 
-    This is diagnostic-only. The estimate uses equal physical grid spacing and
-    the cosine correction at the mean labelled latitude. It is emitted only
-    when one axis has a single detected line and the other has at least two.
-    """
+
+def _median(values):
+    values = sorted(values)
+    if not values:
+        return None
+    middle = len(values) // 2
+    return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2.0
+
+
+def _calculated_complement(candidates, width, height, roi, labels):
+    """Fill a single-line axis using the confirmed spacing of the other axis."""
     lat, lon = candidates["LAT"], candidates["LONG"]
-    if len(lat) == 1 and len(lon) >= 2:
-        intervals = [abs(lon[i + 1][0] - lon[i][0]) for i in range(len(lon) - 1)]
-        pixel_spacing = sorted(intervals)[len(intervals) // 2]
-        lat_values = [v["value"] for v in labels if v["axis"] == "LAT"]
-        latitude = sum(lat_values) / len(lat_values) if lat_values else 0.0
-        spacing = pixel_spacing / max(0.15, math.cos(math.radians(abs(latitude))))
-        anchor = lat[0][0]
-        calculated = []
-        y = anchor - spacing
-        while y > height * 0.04:
-            calculated.append((y, 0.0, width, "CALCULATED", None))
-            y -= spacing
-        y = anchor + spacing
-        while y < height * 0.96:
-            calculated.append((y, 0.0, width, "CALCULATED", None))
-            y += spacing
-        return calculated, {"axis": "LAT", "spacing_pt": spacing, "latitude_used": latitude}
-    if len(lon) == 1 and len(lat) >= 2:
-        intervals = [abs(lat[i + 1][0] - lat[i][0]) for i in range(len(lat) - 1)]
-        pixel_spacing = sorted(intervals)[len(intervals) // 2]
-        lat_values = [v["value"] for v in labels if v["axis"] == "LAT"]
-        latitude = sum(lat_values) / len(lat_values) if lat_values else 0.0
-        spacing = pixel_spacing * max(0.15, math.cos(math.radians(abs(latitude))))
-        anchor = lon[0][0]
-        calculated = []
-        x = anchor - spacing
-        while x > width * 0.04:
-            calculated.append((x, 0.0, height, "CALCULATED", None))
-            x -= spacing
-        x = anchor + spacing
-        while x < width * 0.96:
-            calculated.append((x, 0.0, height, "CALCULATED", None))
-            x += spacing
-        return calculated, {"axis": "LONG", "spacing_pt": spacing, "latitude_used": latitude}
-    return [], None
+    missing_axis = "LAT" if len(lat) == 1 and len(lon) >= 2 else (
+        "LONG" if len(lon) == 1 and len(lat) >= 2 else None
+    )
+    if missing_axis is None:
+        return [], None
+
+    known = lon if missing_axis == "LAT" else lat
+    positions = [item[0] for item in known]
+    pixel_intervals = [abs(positions[i + 1] - positions[i]) for i in range(len(positions) - 1)]
+    pixel_step = _median(pixel_intervals)
+    if not pixel_step or pixel_step <= 0:
+        return [], None
+
+    value_intervals = [
+        abs(known[i + 1][4] - known[i][4])
+        for i in range(len(known) - 1)
+        if known[i][4] is not None and known[i + 1][4] is not None
+    ]
+    angular_step = _median(value_intervals)
+    if not angular_step or angular_step <= 0:
+        # Standard chart graticule interval fallback: one minute.
+        angular_step = 1.0 / 60.0
+
+    lat_values = [item["value"] for item in labels if item["axis"] == "LAT"]
+    mean_lat = abs(sum(lat_values) / len(lat_values)) if lat_values else 0.0
+    cosine = max(0.15, math.cos(math.radians(mean_lat)))
+
+    # At equal angular intervals, longitude spacing contracts by cos(latitude).
+    if missing_axis == "LAT":
+        spacing = pixel_step / cosine
+        anchor = lat[0]
+        fixed_min, fixed_max = 0.0, height
+    else:
+        spacing = pixel_step * cosine
+        anchor = lon[0]
+        fixed_min, fixed_max = 0.0, width
+
+    if spacing <= 0:
+        return [], None
+    anchor_value = anchor[4]
+    hemisphere = anchor[5]
+    calculated = []
+    step_count = 1
+    while anchor[0] - step_count * spacing > fixed_min:
+        position = anchor[0] - step_count * spacing
+        value = anchor_value + step_count * angular_step
+        calculated.append((position, 0.0, width if missing_axis == "LAT" else height,
+                           _format_coordinate(value, missing_axis, hemisphere), value, hemisphere))
+        step_count += 1
+    step_count = 1
+    while anchor[0] + step_count * spacing < fixed_max:
+        position = anchor[0] + step_count * spacing
+        value = anchor_value - step_count * angular_step
+        calculated.append((position, 0.0, width if missing_axis == "LAT" else height,
+                           _format_coordinate(value, missing_axis, hemisphere), value, hemisphere))
+        step_count += 1
+
+    calculated.sort(key=lambda item: item[0])
+    return calculated, {
+        "axis": missing_axis,
+        "spacing_pt": spacing,
+        "angular_step_deg": angular_step,
+        "latitude_used": mean_lat,
+        "derived_from": "LONG" if missing_axis == "LAT" else "LAT",
+    }
 
 
-def detect_page_grid_candidates(page: pymupdf.Page):
-    """Stage 02: visible horizontal vectors are LAT; visible vertical are LONG."""
-    width, height = float(page.rect.width), float(page.rect.height)
-    merge_gap = max(36.0, max(width, height) * 0.08)
-    lat = _merge_segments(_visible_segments(page, True), max_gap=merge_gap)
-    lon = _merge_segments(_visible_segments(page, False), max_gap=merge_gap)
-
-    # Reject only page-frame neighbourhoods. Do not require a line to span
-    # half the page: interrupted and partially obscured grid vectors are valid.
-    lat = [v for v in lat if height * 0.035 < v[0] < height * 0.965
-           and v[2] - v[1] >= width * 0.18]
-    lon = [v for v in lon if width * 0.035 < v[0] < width * 0.965
-           and v[2] - v[1] >= height * 0.18]
-
-    labels = _coordinate_labels(page)
-    lat = _attach_labels(sorted(lat), labels, "LAT")
-    lon = _attach_labels(sorted(lon), labels, "LONG")
+def detect_page_grid_candidates(page: pymupdf.Page, roi: pymupdf.Rect):
+    """Stage 02: ROI-anchored LAT/LONG detection; never classify arbitrary page lines."""
+    expanded = _expanded_roi(roi, page)
+    labels = _coordinate_labels(page, expanded)
+    horizontal = _merge_segments(
+        _visible_segments(page, True, roi),
+        max_gap=max(12.0, roi.width * 0.035),
+    )
+    vertical = _merge_segments(
+        _visible_segments(page, False, roi),
+        max_gap=max(12.0, roi.height * 0.035),
+    )
+    lat = _match_grid_lines(horizontal, labels, "LAT", roi)
+    lon = _match_grid_lines(vertical, labels, "LONG", roi)
     calculated, calculation = _calculated_complement(
-        {"LAT": lat, "LONG": lon}, width, height, labels
+        {"LAT": lat, "LONG": lon}, float(page.rect.width), float(page.rect.height), roi, labels
     )
     return {
         "LAT": lat,
@@ -170,56 +264,52 @@ def detect_page_grid_candidates(page: pymupdf.Page):
         "CALCULATED": calculated,
         "labels": labels,
         "calculation": calculation,
+        "roi": roi,
     }
 
 
-def save_grid_diagnostic(source_pdf: Path, output_image: Path):
+def save_grid_diagnostic(source_pdf: Path, output_image: Path, roi_data: dict):
     doc = pymupdf.open(source_pdf)
     try:
         page = doc[0]
-        candidates = detect_page_grid_candidates(page)
+        roi = pymupdf.Rect(
+            float(roi_data["x0"]), float(roi_data["y0"]),
+            float(roi_data["x1"]), float(roi_data["y1"]),
+        )
+        candidates = detect_page_grid_candidates(page, roi)
         width, height = float(page.rect.width), float(page.rect.height)
-
-        # Drawing APIs use unrotated PDF coordinates. Map visible geometry back
-        # for annotation only; this does not rotate or modify the source PDF.
         derotation = page.derotation_matrix
 
         def raw_point(x, y):
             return pymupdf.Point(x, y) * derotation
 
-        def draw_visible_line(p1, p2, **kwargs):
+        def draw_line(p1, p2, **kwargs):
             page.draw_line(raw_point(*p1), raw_point(*p2), **kwargs)
 
-        def insert_visible_text(point, text, **kwargs):
+        def insert_text(point, text, **kwargs):
             page.insert_text(raw_point(*point), text, **kwargs)
 
-        # Extend every accepted grid candidate over the complete visible page.
+        # Confirmed grid lines: red LAT, blue LONG. Each is extended to page edges.
         for axis, color in (("LAT", (1, 0, 0)), ("LONG", (0, 0.25, 1))):
             for index, item in enumerate(candidates[axis], 1):
-                fixed, _start, _end, label, _value = item
+                fixed, _start, _end, _label, value, hemisphere = item
+                caption = _format_coordinate(value, axis, hemisphere) if value is not None else _label
                 if axis == "LAT":
-                    draw_visible_line((0, fixed), (width, fixed), color=color, width=1.25, overlay=True)
-                    caption = label or f"LAT candidate {index}"
-                    insert_visible_text((5, max(10, fixed - 3)), caption,
-                                     fontsize=7, color=color, overlay=True)
+                    draw_line((0, fixed), (width, fixed), color=color, width=1.35, overlay=True)
+                    insert_text((5, max(10, fixed - 4)), caption, fontsize=7, color=color, overlay=True)
                 else:
-                    draw_visible_line((fixed, 0), (fixed, height), color=color, width=1.25, overlay=True)
-                    caption = label or f"LONG candidate {index}"
-                    insert_visible_text((fixed + 3, 12), caption,
-                                     fontsize=7, color=color, overlay=True)
+                    draw_line((fixed, 0), (fixed, height), color=color, width=1.35, overlay=True)
+                    insert_text((fixed + 3, 12), caption, fontsize=7, color=color, overlay=True)
 
-        for index, item in enumerate(candidates["CALCULATED"], 1):
-            fixed, _start, _end, _label, _value = item
+        # Calculated grid lines: green, with extrapolated DMS coordinate values.
+        for item in candidates["CALCULATED"]:
+            fixed, _start, _end, caption, _value, _hemisphere = item
             if candidates["calculation"]["axis"] == "LAT":
-                draw_visible_line((0, fixed), (width, fixed), color=(0.1, 0.65, 0.1),
-                               width=1.5, overlay=True)
-                insert_visible_text((5, max(10, fixed - 3)), f"LAT CALCULATED {index}",
-                                 fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
+                draw_line((0, fixed), (width, fixed), color=(0.1, 0.65, 0.1), width=1.5, overlay=True)
+                insert_text((5, max(10, fixed - 4)), caption, fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
             else:
-                draw_visible_line((fixed, 0), (fixed, height), color=(0.1, 0.65, 0.1),
-                               width=1.5, overlay=True)
-                insert_visible_text((fixed + 3, 12), f"LONG CALCULATED {index}",
-                                 fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
+                draw_line((fixed, 0), (fixed, height), color=(0.1, 0.65, 0.1), width=1.5, overlay=True)
+                insert_text((fixed + 3, 12), caption, fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
 
         output_image.parent.mkdir(parents=True, exist_ok=True)
         pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
@@ -229,6 +319,7 @@ def save_grid_diagnostic(source_pdf: Path, output_image: Path):
             "LONG": len(candidates["LONG"]),
             "CALCULATED": len(candidates["CALCULATED"]),
             "labels": len(candidates["labels"]),
+            "calculation": candidates["calculation"],
         }
     finally:
         doc.close()
@@ -237,14 +328,21 @@ def save_grid_diagnostic(source_pdf: Path, output_image: Path):
 def run_aerodrome_grid_diagnostics(input_dir: Path, output_dir: Path,
                                    charts: Iterable[object]):
     output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = input_dir / "roi_manifest.json"
+    if not manifest_path.is_file():
+        return []
+    records = json.loads(manifest_path.read_text(encoding="utf-8"))
     results = []
     for chart in charts:
         if str(getattr(chart, "procedure", "")).strip().upper() != "AERODROME DIAGRAM":
             continue
-        source = input_dir / str(getattr(chart, "filename", ""))
-        if not source.is_file():
+        filename = str(getattr(chart, "filename", ""))
+        source = input_dir / filename
+        record = records.get(filename)
+        roi_data = (record or {}).get("roi")
+        if not source.is_file() or not roi_data:
             continue
         target = output_dir / f"{source.stem}_grid-diagnostic.png"
-        counts = save_grid_diagnostic(source, target)
+        counts = save_grid_diagnostic(source, target, roi_data)
         results.append((source.name, counts))
     return results

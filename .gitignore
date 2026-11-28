@@ -3,10 +3,14 @@
 ################################################################################
 
 /.vs
-/HEDEF/Initial
-/__pycache__
 /Kitap.pdf
 /HEDEF
-/App/__pycache__/orientation_turn.cpython-314.pyc
-/App/__pycache__/flip_parser.cpython-314.pyc
-/App/tests/__pycache__
+
+# Python önbellek dosyaları ve klasörleri
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+
+

@@ -92,7 +92,9 @@ class RmaEdgeTickValidationTests(unittest.TestCase):
 
     def test_single_unpaired_tick_requires_a_coordinate_label(self):
         self.page.draw_line((46, 150), (54, 150), color=(0, 0, 0), width=1)
-        self.assertIsNone(self.vote())
+        rejected = self.vote()
+        self.assertIsNotNone(rejected)
+        self.assertTrue(rejected["ignored"])
 
         self.add_left_label(150)
         vote = self.vote()
@@ -105,14 +107,18 @@ class RmaEdgeTickValidationTests(unittest.TestCase):
         self.page.draw_line((46, 200), (54, 200), color=(0, 0, 0), width=1)
         self.add_left_label(100)
 
-        self.assertIsNone(self.vote())
+        rejected = self.vote()
+        self.assertIsNotNone(rejected)
+        self.assertTrue(rejected["ignored"])
 
     def test_irregular_tick_intervals_are_rejected(self):
         for y, label in ((100, "35-10N"), (200, "35-11N"), (330, "35-12N")):
             self.add_pair(y)
             self.add_left_label(y, label)
 
-        self.assertIsNone(self.vote())
+        rejected = self.vote()
+        self.assertIsNotNone(rejected)
+        self.assertTrue(rejected["ignored"])
 
 
 if __name__ == "__main__":

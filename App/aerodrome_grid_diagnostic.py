@@ -212,12 +212,12 @@ def save_grid_diagnostic(source_pdf: Path, output_image: Path):
             fixed, _start, _end, _label, _value = item
             if candidates["calculation"]["axis"] == "LAT":
                 draw_visible_line((0, fixed), (width, fixed), color=(0.1, 0.65, 0.1),
-                               width=1.5, dashes="[5 3]", overlay=True)
+                               width=1.5, overlay=True)
                 insert_visible_text((5, max(10, fixed - 3)), f"LAT CALCULATED {index}",
                                  fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
             else:
                 draw_visible_line((fixed, 0), (fixed, height), color=(0.1, 0.65, 0.1),
-                               width=1.5, dashes="[5 3]", overlay=True)
+                               width=1.5, overlay=True)
                 insert_visible_text((fixed + 3, 12), f"LONG CALCULATED {index}",
                                  fontsize=7, color=(0.1, 0.65, 0.1), overlay=True)
 

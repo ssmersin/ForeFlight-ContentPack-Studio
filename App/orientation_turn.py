@@ -1042,7 +1042,13 @@ def _find_rma_latitude_vote(
         if not options:
             continue
         edge, gap, coordinate, axis = min(options, key=lambda item: item[1])
-        if gap > edge_tol:
+        edge_coord = {"left": roi_rect.x0, "right": roi_rect.x1,
+                      "top": roi_rect.y0, "bottom": roi_rect.y1}[edge]
+        edge_span = (min(x0, x1) - edge_coord <= edge_tol
+                     and max(x0, x1) + edge_tol >= edge_coord) if axis == "y" else (
+                     min(y0, y1) - edge_coord <= edge_tol
+                     and max(y0, y1) + edge_tol >= edge_coord)
+        if gap > edge_tol or not edge_span:
             continue
         dedupe_key = (edge, round(coordinate / 2.0))
         if dedupe_key in seen:
@@ -1092,8 +1098,24 @@ def _find_rma_latitude_vote(
         key = (tick["edge"], round(tick["coordinate"] / 2.0))
         by_tick.setdefault(key, []).append(label)
     labels = [items[0] for items in by_tick.values() if len(items) == 1]
+    # A left/right (or top/bottom) pair may have one label total, never two.
+    unique_pair_labels = []
+    for label in labels:
+        tick = label["tick"]
+        same_pair = [other for other in labels
+                     if other["tick"]["axis"] == tick["axis"]
+                     and abs(other["tick"]["coordinate"] - tick["coordinate"]) <= pair_tol]
+        if len(same_pair) == 1:
+            unique_pair_labels.append(label)
+    labels = unique_pair_labels
     if not labels:
-        return None
+        # Preserve rejected tick marks in diagnostics; they cannot vote.
+        rejected_boxes = []
+        for tick in raw_ticks:
+            x0, y0, x1, y1 = tick["seg"]
+            rejected_boxes.append(ReferenceBox(min(x0, x1), min(y0, y1),
+                max(x0, x1), max(y0, y1), 0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
+        return {"rot": None, "n": 0, "boxes": rejected_boxes, "ignored": True}
 
     # Build one candidate per labelled coordinate. If there are several
     # coordinates on an axis, each must have its opposite-edge counterpart.
@@ -1120,24 +1142,31 @@ def _find_rma_latitude_vote(
     if not candidates:
         return None
 
-    # Reject irregularly spaced coordinate series. Two positions define one
-    # interval; three or more are required to test interval equality.
-    valid_candidates = []
+    # Validate spacing against the complete detected pair series, not only
+    # the subset that happens to carry labels.
+    invalid_axes = set()
     for axis in ("x", "y"):
-        series = sorted((item for item in candidates if item["axis"] == axis),
-                        key=lambda item: item["coordinate"])
-        if len(series) >= 3:
-            intervals = [series[i + 1]["coordinate"] - series[i]["coordinate"]
-                         for i in range(len(series) - 1)]
+        paired_coordinates = []
+        for tick in raw_ticks:
+            if tick["axis"] != axis:
+                continue
+            if any(other["edge"] == opposite[tick["edge"]]
+                   and other["axis"] == axis
+                   and abs(other["coordinate"] - tick["coordinate"]) <= pair_tol
+                   for other in raw_ticks):
+                if not any(abs(tick["coordinate"] - old) <= pair_tol for old in paired_coordinates):
+                    paired_coordinates.append(tick["coordinate"])
+        paired_coordinates.sort()
+        if len(paired_coordinates) >= 3:
+            intervals = [paired_coordinates[i + 1] - paired_coordinates[i]
+                         for i in range(len(paired_coordinates) - 1)]
             mean_interval = sum(intervals) / len(intervals)
             tolerance = max(2.5, mean_interval * 0.10)
             if mean_interval <= 0 or any(abs(value - mean_interval) > tolerance
                                          for value in intervals):
-                continue
-        valid_candidates.extend(series)
-    if not valid_candidates:
-        return None
+                invalid_axes.add(axis)
 
+    valid_candidates = [item for item in candidates if item["axis"] not in invalid_axes]
     rotations = {item["rot"] for item in valid_candidates}
     boxes = []
     for item in valid_candidates:
@@ -1149,7 +1178,18 @@ def _find_rma_latitude_vote(
                 x0, y0, x1, y1 = seg
                 boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
                                           item["rot"], 3.0, kind, "LAT TICK"))
-    if len(rotations) != 1:
+    accepted_segments = set()
+    for item in valid_candidates:
+        accepted_segments.add(tuple(item["tick"]))
+        if item["opposite_tick"] is not None:
+            accepted_segments.add(tuple(item["opposite_tick"]))
+    for tick in raw_ticks:
+        if tuple(tick["seg"]) in accepted_segments:
+            continue
+        x0, y0, x1, y1 = tick["seg"]
+        boxes.append(ReferenceBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+                                  0, 1.0, "lat_tick_rejected", "REJECTED TICK"))
+    if not valid_candidates or len(rotations) != 1:
         return {"rot": None, "n": len(valid_candidates), "boxes": boxes, "ignored": True}
     return {"rot": rotations.pop(), "n": len(valid_candidates), "boxes": boxes, "ignored": False}
 
@@ -1394,9 +1434,10 @@ def _save_turn_diagnostic(target_pdf, orig_roi, orig_page_w, orig_page_h, result
                 lx0, ly0, lx1, ly1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
                 cv2.rectangle(bgr, (lx0 - 4, ly0 - 4), (lx1 + 4, ly1 + 4), (0, 170, 0), 2)
                 continue
-            if ref.kind in ("lat_tick", "lat_opposite_tick"):
+            if ref.kind in ("lat_tick", "lat_opposite_tick", "lat_tick_rejected"):
                 tx0, ty0, tx1, ty1 = TR(ref.x0, ref.y0, ref.x1, ref.y1)
-                color = (0, 165, 255) if ref.kind == "lat_tick" else (255, 0, 255)
+                color = ((0, 0, 255) if ref.kind == "lat_tick_rejected"
+                         else (0, 165, 255) if ref.kind == "lat_tick" else (255, 0, 255))
                 cv2.line(bgr, (tx0, ty0), (tx1, ty1), color, 4, cv2.LINE_AA)
                 continue
             if ref.kind == "arrow_axis" and ref.line:
